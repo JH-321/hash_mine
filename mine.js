@@ -83,6 +83,10 @@ class MiningWindowClosed extends Error {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
@@ -134,9 +138,8 @@ async function main() {
     const miningWindow = miningWindowFor(stateNow.epochBlocksLeft);
     console.log(`\n[block ${blockNo}] challenge=${challenge.slice(0,10)}… difficulty=2^${256 - difficulty.toString(2).length} headroom`);
     if (miningWindow.closed) {
-      console.log(`↻ mining window closed before start (${miningWindow.blocksLeft} blocks left, guard ${miningWindow.safetyBlocks}); refreshing challenge`);
-      if (ONCE) return;
-      await new Promise(r => setTimeout(r, 1000));
+      console.log(`↻ mining window closed before start (${miningWindow.blocksLeft} blocks left, guard ${miningWindow.safetyBlocks})`);
+      await waitForNextMiningWindow(readC, stateNow.epoch.toString());
       continue;
     }
     if (miningWindow.timeoutSeconds) {
@@ -150,10 +153,14 @@ async function main() {
         startEpoch: stateNow.epoch.toString(),
       });
     } catch (e) {
-      if (e instanceof MiningTimedOut || e instanceof MiningWindowClosed) {
+      if (e instanceof MiningWindowClosed) {
         console.log(`↻ ${e.message}; refreshing challenge`);
-        if (ONCE) return;
-        await new Promise(r => setTimeout(r, 1000));
+        await waitForNextMiningWindow(readC, stateNow.epoch.toString());
+        continue;
+      }
+      if (e instanceof MiningTimedOut) {
+        console.log(`↻ ${e.message}; refreshing challenge`);
+        await sleep(1000);
         continue;
       }
       throw e;
@@ -201,7 +208,7 @@ async function main() {
     }
 
     if (ONCE) return;
-    await new Promise(r => setTimeout(r, 1000));
+    await sleep(1000);
   }
 }
 
@@ -232,6 +239,25 @@ function miningWindowFor(epochBlocksLeft) {
     closed: blocksLeft <= safetyBlocks,
     timeoutSeconds: timeoutSeconds > 0 ? timeoutSeconds : 0,
   };
+}
+
+function blockWatchSeconds() {
+  return Math.max(1, Number(process.env.BLOCK_WATCH_SECONDS || '3'));
+}
+
+async function waitForNextMiningWindow(readC, currentEpoch) {
+  const pollSeconds = blockWatchSeconds();
+  console.log(`→ waiting for next epoch after ${currentEpoch} (poll ${pollSeconds}s)`);
+  while (true) {
+    await sleep(pollSeconds * 1000);
+    const state = await readC.miningState();
+    const stateEpoch = state.epoch.toString();
+    const window = miningWindowFor(state.epochBlocksLeft);
+    if (stateEpoch !== currentEpoch && !window.closed) {
+      console.log(`↻ next epoch ${state.epoch} open (${state.epochBlocksLeft} blocks left); starting miner`);
+      return;
+    }
+  }
 }
 
 function cudaDevices() {
@@ -338,7 +364,7 @@ function findNonceGPU(challenge, difficulty, miningWindow, monitor) {
       }, timeoutSeconds * 1000);
     }
 
-    const pollSeconds = Math.max(1, Number(process.env.BLOCK_WATCH_SECONDS || '3'));
+    const pollSeconds = blockWatchSeconds();
     if (monitor?.readC && monitor?.startEpoch) {
       epochPoller = setInterval(async () => {
         try {

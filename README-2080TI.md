@@ -107,8 +107,9 @@ BLOCK_WATCH_SECONDS=3
 ```
 
 The miner will not start a new GPU search when the current epoch has only the
-guard blocks left. While mining, `mine.js` watches `miningState()` and stops the
-GPU processes when the epoch changes or the guard window is reached.
+guard blocks left. It waits for the next epoch to open, then starts mining
+again automatically. While mining, `mine.js` watches `miningState()` and stops
+the GPU processes when the epoch changes or the guard window is reached.
 
 ## 7. Useful Environment
 
@@ -121,4 +122,3 @@ export GAS_LIMIT=200000
 If logs are too noisy with 8 GPUs, lower reporting by running one card first for
 benchmarks, then use the full `CUDA_DEVICES=0,1,2,3,4,5,6,7` command for live
 mining.
-
