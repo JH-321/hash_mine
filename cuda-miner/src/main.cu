@@ -250,64 +250,23 @@ __device__ __forceinline__ void keccakf_regs(
     }
 }
 
-template <uint32_t FIXED_NONCES_PER_THREAD, uint32_t FIXED_NONCE_STRIDE>
-__global__ void mine_kernel(
+template <bool NONCE_HI_ZERO>
+__device__ __forceinline__ bool nonce_meets_target(
     KernelParams params,
-    const uint32_t* __restrict__ nonce_base,
-    uint32_t* __restrict__ found,
-    uint32_t* __restrict__ result,
-    uint32_t dynamic_nonces_per_thread,
-    uint32_t dynamic_nonce_stride
+    uint32_t nlo_lo,
+    uint32_t nlo_hi,
+    uint32_t nhi_lo,
+    uint32_t nhi_hi
 ) {
-    constexpr bool fixed_nonces_per_thread = FIXED_NONCES_PER_THREAD != 0;
-    constexpr bool fixed_nonce_stride = FIXED_NONCE_STRIDE != 0;
-    const uint32_t nonces_per_thread = fixed_nonces_per_thread
-        ? FIXED_NONCES_PER_THREAD
-        : dynamic_nonces_per_thread;
-    const uint32_t nonce_stride = fixed_nonce_stride
-        ? FIXED_NONCE_STRIDE
-        : dynamic_nonce_stride;
-    uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t offset = tid * (uint64_t)nonces_per_thread * (uint64_t)nonce_stride;
-
-    uint32_t base_lo = nonce_base[0] + (uint32_t)offset;
-    uint32_t carry0 = base_lo < nonce_base[0] ? 1u : 0u;
-    uint32_t offset_hi = (uint32_t)(offset >> 32);
-    uint32_t base_hi_tmp = nonce_base[1] + offset_hi;
-    uint32_t carry1a = base_hi_tmp < nonce_base[1] ? 1u : 0u;
-    uint32_t base_hi = base_hi_tmp + carry0;
-    uint32_t carry1b = base_hi < base_hi_tmp ? 1u : 0u;
-    uint32_t carry1 = carry1a | carry1b;
-    uint32_t base_nhi_lo = nonce_base[2] + carry1;
-    uint32_t carry2 = base_nhi_lo < nonce_base[2] ? 1u : 0u;
-    uint32_t base_nhi_hi = nonce_base[3] + carry2;
-
-#pragma unroll 1
-    for (uint32_t iter = 0; iter < nonces_per_thread; iter++) {
-        if constexpr (FIXED_NONCES_PER_THREAD != 1) {
-            if (*found != 0u) return;
-        }
-
-        uint64_t iter_offset = (uint64_t)iter * (uint64_t)nonce_stride;
-        uint32_t nlo_lo = base_lo + (uint32_t)iter_offset;
-        uint32_t c0 = nlo_lo < base_lo ? 1u : 0u;
-        uint32_t iter_offset_hi = (uint32_t)(iter_offset >> 32);
-        uint32_t nlo_hi_tmp = base_hi + iter_offset_hi;
-        uint32_t c1a = nlo_hi_tmp < base_hi ? 1u : 0u;
-        uint32_t nlo_hi = nlo_hi_tmp + c0;
-        uint32_t c1b = nlo_hi < nlo_hi_tmp ? 1u : 0u;
-        uint32_t c1 = c1a | c1b;
-        uint32_t nhi_lo = base_nhi_lo + c1;
-        uint32_t c2 = nhi_lo < base_nhi_lo ? 1u : 0u;
-        uint32_t nhi_hi = base_nhi_hi + c2;
-
         U64x a00 = make_u64x(params.challenge[0], params.challenge[1]);
         U64x a10 = make_u64x(params.challenge[2], params.challenge[3]);
         U64x a20 = make_u64x(params.challenge[4], params.challenge[5]);
         U64x a30 = make_u64x(params.challenge[6], params.challenge[7]);
         U64x a40 = make_u64x(0, 0);
         U64x a01 = make_u64x(0, 0);
-        U64x a11 = make_u64x(bswap32(nhi_hi), bswap32(nhi_lo));
+        U64x a11 = NONCE_HI_ZERO
+            ? make_u64x(0, 0)
+            : make_u64x(bswap32(nhi_hi), bswap32(nhi_lo));
         U64x a21 = make_u64x(bswap32(nlo_hi), bswap32(nlo_lo));
         U64x a31 = make_u64x(0x00000001u, 0);
         U64x a41 = make_u64x(0, 0);
@@ -412,13 +371,107 @@ __global__ void mine_kernel(
             }
         }
 
-        if (less) {
-            if (atomicCAS(found, 0u, 1u) == 0u) {
-                result[0] = nlo_lo;
-                result[1] = nlo_hi;
-                result[2] = nhi_lo;
-                result[3] = nhi_hi;
-            }
+        return less;
+}
+
+__device__ __forceinline__ void publish_nonce(
+    uint32_t* __restrict__ found,
+    uint32_t* __restrict__ result,
+    uint32_t nlo_lo,
+    uint32_t nlo_hi,
+    uint32_t nhi_lo,
+    uint32_t nhi_hi
+) {
+    if (atomicCAS(found, 0u, 1u) == 0u) {
+        result[0] = nlo_lo;
+        result[1] = nlo_hi;
+        result[2] = nhi_lo;
+        result[3] = nhi_hi;
+    }
+}
+
+template <uint32_t FIXED_NONCES_PER_THREAD, uint32_t FIXED_NONCE_STRIDE, uint32_t FIXED_NONCE_HI_ZERO>
+__global__ void mine_kernel(
+    KernelParams params,
+    const uint32_t* __restrict__ nonce_base,
+    uint32_t* __restrict__ found,
+    uint32_t* __restrict__ result,
+    uint32_t dynamic_nonces_per_thread,
+    uint32_t dynamic_nonce_stride
+) {
+    constexpr bool fixed_nonces_per_thread = FIXED_NONCES_PER_THREAD != 0;
+    constexpr bool fixed_nonce_stride = FIXED_NONCE_STRIDE != 0;
+    constexpr bool nonce_hi_zero = FIXED_NONCE_HI_ZERO != 0;
+    const uint32_t nonces_per_thread = fixed_nonces_per_thread
+        ? FIXED_NONCES_PER_THREAD
+        : dynamic_nonces_per_thread;
+    const uint32_t nonce_stride = fixed_nonce_stride
+        ? FIXED_NONCE_STRIDE
+        : dynamic_nonce_stride;
+
+    if constexpr (FIXED_NONCES_PER_THREAD == 1 && FIXED_NONCE_STRIDE == 1) {
+        uint32_t tid_lo = blockIdx.x * blockDim.x + threadIdx.x;
+        uint32_t nlo_lo = nonce_base[0] + tid_lo;
+        uint32_t carry0 = nlo_lo < nonce_base[0] ? 1u : 0u;
+        uint32_t nlo_hi = nonce_base[1] + carry0;
+        uint32_t nhi_lo = 0;
+        uint32_t nhi_hi = 0;
+        if constexpr (!nonce_hi_zero) {
+            uint32_t carry1 = nlo_hi < nonce_base[1] ? 1u : 0u;
+            nhi_lo = nonce_base[2] + carry1;
+            uint32_t carry2 = nhi_lo < nonce_base[2] ? 1u : 0u;
+            nhi_hi = nonce_base[3] + carry2;
+        }
+        if (nonce_meets_target<nonce_hi_zero>(params, nlo_lo, nlo_hi, nhi_lo, nhi_hi)) {
+            publish_nonce(found, result, nlo_lo, nlo_hi, nhi_lo, nhi_hi);
+        }
+        return;
+    }
+
+    uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t offset = tid * (uint64_t)nonces_per_thread * (uint64_t)nonce_stride;
+
+    uint32_t base_lo = nonce_base[0] + (uint32_t)offset;
+    uint32_t carry0 = base_lo < nonce_base[0] ? 1u : 0u;
+    uint32_t offset_hi = (uint32_t)(offset >> 32);
+    uint32_t base_hi_tmp = nonce_base[1] + offset_hi;
+    uint32_t base_hi = base_hi_tmp + carry0;
+    uint32_t base_nhi_lo = 0;
+    uint32_t base_nhi_hi = 0;
+    if constexpr (!nonce_hi_zero) {
+        uint32_t carry1a = base_hi_tmp < nonce_base[1] ? 1u : 0u;
+        uint32_t carry1b = base_hi < base_hi_tmp ? 1u : 0u;
+        uint32_t carry1 = carry1a | carry1b;
+        base_nhi_lo = nonce_base[2] + carry1;
+        uint32_t carry2 = base_nhi_lo < nonce_base[2] ? 1u : 0u;
+        base_nhi_hi = nonce_base[3] + carry2;
+    }
+
+#pragma unroll 1
+    for (uint32_t iter = 0; iter < nonces_per_thread; iter++) {
+        if constexpr (FIXED_NONCES_PER_THREAD != 1) {
+            if (*found != 0u) return;
+        }
+
+        uint64_t iter_offset = (uint64_t)iter * (uint64_t)nonce_stride;
+        uint32_t nlo_lo = base_lo + (uint32_t)iter_offset;
+        uint32_t c0 = nlo_lo < base_lo ? 1u : 0u;
+        uint32_t iter_offset_hi = (uint32_t)(iter_offset >> 32);
+        uint32_t nlo_hi_tmp = base_hi + iter_offset_hi;
+        uint32_t nlo_hi = nlo_hi_tmp + c0;
+        uint32_t nhi_lo = 0;
+        uint32_t nhi_hi = 0;
+        if constexpr (!nonce_hi_zero) {
+            uint32_t c1a = nlo_hi_tmp < base_hi ? 1u : 0u;
+            uint32_t c1b = nlo_hi < nlo_hi_tmp ? 1u : 0u;
+            uint32_t c1 = c1a | c1b;
+            nhi_lo = base_nhi_lo + c1;
+            uint32_t c2 = nhi_lo < base_nhi_lo ? 1u : 0u;
+            nhi_hi = base_nhi_hi + c2;
+        }
+
+        if (nonce_meets_target<nonce_hi_zero>(params, nlo_lo, nlo_hi, nhi_lo, nhi_hi)) {
+            publish_nonce(found, result, nlo_lo, nlo_hi, nhi_lo, nhi_hi);
             return;
         }
     }
@@ -674,16 +727,34 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(d_found, &found, sizeof(uint32_t), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_nonce_base, nonce_base, 4 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
-        if (selftest) {
-            mine_kernel<1, 1><<<1, 1>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
-        } else if (nonces_per_thread == 1 && nonce_stride == 1) {
-            mine_kernel<1, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
-        } else if (nonces_per_thread == 1) {
-            mine_kernel<1, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, nonce_stride);
-        } else if (nonce_stride == 1) {
-            mine_kernel<0, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, 1);
+        unsigned __int128 batch_span = (unsigned __int128)(batch - 1) * (unsigned __int128)nonce_stride;
+        bool nonce_hi_zero_batch = nonce_hi == 0 &&
+            ((unsigned __int128)nonce_lo + batch_span <= (unsigned __int128)~(uint64_t)0);
+
+        if (nonce_hi_zero_batch) {
+            if (selftest) {
+                mine_kernel<1, 1, 1><<<1, 1>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
+            } else if (nonces_per_thread == 1 && nonce_stride == 1) {
+                mine_kernel<1, 1, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
+            } else if (nonces_per_thread == 1) {
+                mine_kernel<1, 0, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, nonce_stride);
+            } else if (nonce_stride == 1) {
+                mine_kernel<0, 1, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, 1);
+            } else {
+                mine_kernel<0, 0, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, nonce_stride);
+            }
         } else {
-            mine_kernel<0, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, nonce_stride);
+            if (selftest) {
+                mine_kernel<1, 1, 0><<<1, 1>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
+            } else if (nonces_per_thread == 1 && nonce_stride == 1) {
+                mine_kernel<1, 1, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
+            } else if (nonces_per_thread == 1) {
+                mine_kernel<1, 0, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, nonce_stride);
+            } else if (nonce_stride == 1) {
+                mine_kernel<0, 1, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, 1);
+            } else {
+                mine_kernel<0, 0, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, nonce_stride);
+            }
         }
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
