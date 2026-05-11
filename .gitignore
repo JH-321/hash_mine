@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+
+node_modules/
+gpu-miner/target/
+cuda-miner/target/
+
+.DS_Store
+.claude/
+.omc/
+.omx/

@@ -1,0 +1,20 @@
+{
+  "name": "hash-coin-miner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "mine": "node mine.js",
+    "mine:flashbots": "node mine.js --flashbots",
+    "state": "node mine.js --state-only",
+    "build:cuda": "make -C cuda-miner",
+    "build:metal": "cd gpu-miner && cargo build --release"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
