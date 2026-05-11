@@ -67,6 +67,14 @@ const USE_FLASHBOTS = FLAGS.has('--flashbots');
 const STATE_ONLY    = FLAGS.has('--state-only');
 const ONCE          = FLAGS.has('--once');
 
+class MiningTimedOut extends Error {
+  constructor(seconds) {
+    super(`mining timed out after ${seconds}s`);
+    this.name = 'MiningTimedOut';
+    this.seconds = seconds;
+  }
+}
+
 function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
@@ -112,11 +120,26 @@ async function main() {
 
   while (true) {
     const challenge  = await readC.getChallenge(wallet.address);
-    const difficulty = (await readC.miningState()).difficulty;
+    const stateNow   = await readC.miningState();
+    const difficulty = stateNow.difficulty;
     const blockNo    = await readProvider.getBlockNumber();
+    const miningTimeout = miningTimeoutSeconds(stateNow.epochBlocksLeft);
     console.log(`\n[block ${blockNo}] challenge=${challenge.slice(0,10)}… difficulty=2^${256 - difficulty.toString(2).length} headroom`);
+    if (miningTimeout) console.log(`→ mining window: ${miningTimeout}s (${stateNow.epochBlocksLeft} blocks left)`);
 
-    const nonce = await findNonce(challenge, difficulty);
+    let nonce;
+    try {
+      nonce = await findNonce(challenge, difficulty, miningTimeout);
+    } catch (e) {
+      if (e instanceof MiningTimedOut) {
+        console.log(`↻ ${e.message}; refreshing challenge`);
+        if (ONCE) return;
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+      throw e;
+    }
+
     console.log(`→ nonce found: ${nonce}`);
 
     // Build EIP-1559 tx with aggressive priority fee
@@ -175,31 +198,46 @@ function selectGpuBin() {
 
 const GPU_BIN = selectGpuBin();
 
-async function findNonce(challenge, difficulty) {
-  if (existsSync(GPU_BIN)) return findNonceGPU(challenge, difficulty);
+function miningTimeoutSeconds(epochBlocksLeft) {
+  if (process.env.MINING_TIMEOUT_SECONDS) {
+    return Math.max(1, Number(process.env.MINING_TIMEOUT_SECONDS));
+  }
+  const avgBlockSeconds = Number(process.env.BLOCK_SECONDS || '12');
+  const safetyBlocks = Number(process.env.EPOCH_TIMEOUT_SAFETY_BLOCKS || '2');
+  const blocksLeft = Number(epochBlocksLeft);
+  const safeBlocks = Math.max(0, blocksLeft - safetyBlocks);
+  const seconds = Math.floor(safeBlocks * avgBlockSeconds);
+  return seconds > 0 ? seconds : 0;
+}
+
+async function findNonce(challenge, difficulty, timeoutSeconds) {
+  if (existsSync(GPU_BIN)) return findNonceGPU(challenge, difficulty, timeoutSeconds);
   console.log('GPU miner not found, falling back to CPU workers (slow).');
   console.log('Build CUDA with: cd cuda-miner && make');
   console.log('Build Metal with: cd gpu-miner && cargo build --release');
-  return findNonceCPU(challenge, difficulty);
+  return findNonceCPU(challenge, difficulty, timeoutSeconds);
 }
 
-function findNonceGPU(challenge, difficulty) {
+function findNonceGPU(challenge, difficulty, timeoutSeconds) {
   const diffHex = '0x' + difficulty.toString(16).padStart(64, '0');
   return new Promise((resolve, reject) => {
-    const proc = spawn(GPU_BIN, [challenge, diffHex], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const args = [challenge, diffHex];
+    if (timeoutSeconds) args.push(`--timeout-seconds=${timeoutSeconds}`);
+    const proc = spawn(GPU_BIN, args, { stdio: ['ignore', 'pipe', 'inherit'] });
     let out = '';
     proc.stdout.on('data', (chunk) => { out += chunk.toString(); });
     proc.on('error', reject);
     proc.on('exit', (code) => {
       if (code !== 0) return reject(new Error(`gpu-miner exited ${code}`));
       const nonce = out.trim().split('\n').pop();
+      if ((!nonce || !/^\d+$/.test(nonce)) && timeoutSeconds) return reject(new MiningTimedOut(timeoutSeconds));
       if (!nonce || !/^\d+$/.test(nonce)) return reject(new Error(`bad nonce output: ${JSON.stringify(out)}`));
       resolve(nonce);
     });
   });
 }
 
-async function findNonceCPU(challenge, difficulty) {
+async function findNonceCPU(challenge, difficulty, timeoutSeconds) {
   const numWorkers = Math.max(1, Number(process.env.WORKERS || os.cpus().length - 1));
   console.log(`mining with ${numWorkers} worker thread(s)…`);
 
@@ -210,6 +248,15 @@ async function findNonceCPU(challenge, difficulty) {
     const workers = [];
     let done = false;
     const stop = () => { done = true; workers.forEach(w => w.terminate().catch(() => {})); };
+    let timer = null;
+    if (timeoutSeconds) {
+      timer = setTimeout(() => {
+        if (!done) {
+          stop();
+          reject(new MiningTimedOut(timeoutSeconds));
+        }
+      }, timeoutSeconds * 1000);
+    }
 
     for (let i = 0; i < numWorkers; i++) {
       const w = new Worker(self, {
@@ -222,12 +269,22 @@ async function findNonceCPU(challenge, difficulty) {
         },
       });
       w.on('message', (msg) => {
-        if (msg.type === 'found' && !done) { stop(); resolve(msg.nonce); }
+        if (msg.type === 'found' && !done) {
+          if (timer) clearTimeout(timer);
+          stop();
+          resolve(msg.nonce);
+        }
         if (msg.type === 'hashrate') {
           process.stdout.write(`\r  worker ${msg.workerId}: ${(msg.hps/1000).toFixed(1)} kH/s    `);
         }
       });
-      w.on('error', (e) => { if (!done) { stop(); reject(e); } });
+      w.on('error', (e) => {
+        if (!done) {
+          if (timer) clearTimeout(timer);
+          stop();
+          reject(e);
+        }
+      });
       workers.push(w);
     }
   });

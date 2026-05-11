@@ -463,10 +463,15 @@ static uint64_t env_u64(const char* name, uint64_t fallback) {
 
 static double parse_bench_seconds(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
-        const char* prefix = "--bench-seconds=";
-        size_t n = std::strlen(prefix);
-        if (std::strncmp(argv[i], prefix, n) == 0) {
-            return std::strtod(argv[i] + n, nullptr);
+        const char* bench_prefix = "--bench-seconds=";
+        size_t bench_len = std::strlen(bench_prefix);
+        if (std::strncmp(argv[i], bench_prefix, bench_len) == 0) {
+            return std::strtod(argv[i] + bench_len, nullptr);
+        }
+        const char* timeout_prefix = "--timeout-seconds=";
+        size_t timeout_len = std::strlen(timeout_prefix);
+        if (std::strncmp(argv[i], timeout_prefix, timeout_len) == 0) {
+            return std::strtod(argv[i] + timeout_len, nullptr);
         }
     }
     return 0.0;
@@ -481,7 +486,7 @@ static bool has_flag(int argc, char** argv, const char* flag) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: cuda-miner <challenge-hex32> <difficulty-hex32> [--selftest] [--bench-seconds=N]\n");
+        std::fprintf(stderr, "usage: cuda-miner <challenge-hex32> <difficulty-hex32> [--selftest] [--bench-seconds=N] [--timeout-seconds=N]\n");
         return 2;
     }
 

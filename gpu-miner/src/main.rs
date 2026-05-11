@@ -81,7 +81,10 @@ fn main() {
     let selftest = args.iter().any(|a| a == "--selftest");
     let bench_seconds = args
         .iter()
-        .find_map(|a| a.strip_prefix("--bench-seconds="))
+        .find_map(|a| {
+            a.strip_prefix("--bench-seconds=")
+                .or_else(|| a.strip_prefix("--timeout-seconds="))
+        })
         .and_then(|v| v.parse::<f64>().ok());
 
     let device = Device::system_default().expect("no Metal device");
