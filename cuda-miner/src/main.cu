@@ -44,10 +44,7 @@ __device__ __forceinline__ U64x not64(U64x a) {
 }
 
 __device__ __forceinline__ uint32_t bswap32(uint32_t x) {
-    return ((x & 0xff000000u) >> 24) |
-           ((x & 0x00ff0000u) >> 8) |
-           ((x & 0x0000ff00u) << 8) |
-           ((x & 0x000000ffu) << 24);
+    return __byte_perm(x, 0, 0x0123);
 }
 
 __device__ __forceinline__ U64x rotl64(U64x x, uint32_t n) {
@@ -248,14 +245,19 @@ __device__ __forceinline__ void keccakf_regs(
     }
 }
 
+template <uint32_t FIXED_NONCES_PER_THREAD>
 __global__ void mine_kernel(
     const uint32_t* __restrict__ challenge,
     const uint32_t* __restrict__ target,
     const uint32_t* __restrict__ nonce_base,
     uint32_t* __restrict__ found,
     uint32_t* __restrict__ result,
-    uint32_t nonces_per_thread
+    uint32_t dynamic_nonces_per_thread
 ) {
+    constexpr bool fixed_nonces_per_thread = FIXED_NONCES_PER_THREAD != 0;
+    const uint32_t nonces_per_thread = fixed_nonces_per_thread
+        ? FIXED_NONCES_PER_THREAD
+        : dynamic_nonces_per_thread;
     uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t offset = tid * (uint64_t)nonces_per_thread;
 
@@ -273,7 +275,9 @@ __global__ void mine_kernel(
 
 #pragma unroll 1
     for (uint32_t iter = 0; iter < nonces_per_thread; iter++) {
-        if (nonces_per_thread != 1 && *found != 0u) return;
+        if constexpr (FIXED_NONCES_PER_THREAD != 1) {
+            if (*found != 0u) return;
+        }
 
         uint32_t nlo_lo = base_lo + iter;
         uint32_t c0 = nlo_lo < base_lo ? 1u : 0u;
@@ -537,7 +541,7 @@ static std::string hex_encode(const std::array<uint8_t, 32>& bytes) {
 static uint64_t env_u64(const char* name, uint64_t fallback) {
     const char* v = std::getenv(name);
     if (!v || !*v) return fallback;
-    return std::strtoull(v, nullptr, 10);
+    return std::strtoull(v, nullptr, 0);
 }
 
 static double parse_bench_seconds(int argc, char** argv) {
@@ -615,8 +619,8 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(d_target, target_words.data(), 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     std::mt19937_64 rng((uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count());
-    uint64_t nonce_lo = selftest ? 42ULL : rng();
-    uint64_t nonce_hi = 0;
+    uint64_t nonce_lo = selftest ? 42ULL : env_u64("CUDA_NONCE_LO", rng());
+    uint64_t nonce_hi = selftest ? 0ULL : env_u64("CUDA_NONCE_HI", 0);
 
     uint64_t total = 0;
     auto start = std::chrono::steady_clock::now();
@@ -635,9 +639,11 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(d_nonce_base, nonce_base, 4 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
         if (selftest) {
-            mine_kernel<<<1, 1>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1);
+            mine_kernel<1><<<1, 1>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1);
+        } else if (nonces_per_thread == 1) {
+            mine_kernel<1><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1);
         } else {
-            mine_kernel<<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread);
+            mine_kernel<0><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread);
         }
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
