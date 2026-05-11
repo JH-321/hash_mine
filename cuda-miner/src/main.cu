@@ -245,21 +245,26 @@ __device__ __forceinline__ void keccakf_regs(
     }
 }
 
-template <uint32_t FIXED_NONCES_PER_THREAD>
+template <uint32_t FIXED_NONCES_PER_THREAD, uint32_t FIXED_NONCE_STRIDE>
 __global__ void mine_kernel(
     const uint32_t* __restrict__ challenge,
     const uint32_t* __restrict__ target,
     const uint32_t* __restrict__ nonce_base,
     uint32_t* __restrict__ found,
     uint32_t* __restrict__ result,
-    uint32_t dynamic_nonces_per_thread
+    uint32_t dynamic_nonces_per_thread,
+    uint32_t dynamic_nonce_stride
 ) {
     constexpr bool fixed_nonces_per_thread = FIXED_NONCES_PER_THREAD != 0;
+    constexpr bool fixed_nonce_stride = FIXED_NONCE_STRIDE != 0;
     const uint32_t nonces_per_thread = fixed_nonces_per_thread
         ? FIXED_NONCES_PER_THREAD
         : dynamic_nonces_per_thread;
+    const uint32_t nonce_stride = fixed_nonce_stride
+        ? FIXED_NONCE_STRIDE
+        : dynamic_nonce_stride;
     uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t offset = tid * (uint64_t)nonces_per_thread;
+    uint64_t offset = tid * (uint64_t)nonces_per_thread * (uint64_t)nonce_stride;
 
     uint32_t base_lo = nonce_base[0] + (uint32_t)offset;
     uint32_t carry0 = base_lo < nonce_base[0] ? 1u : 0u;
@@ -279,10 +284,15 @@ __global__ void mine_kernel(
             if (*found != 0u) return;
         }
 
-        uint32_t nlo_lo = base_lo + iter;
+        uint64_t iter_offset = (uint64_t)iter * (uint64_t)nonce_stride;
+        uint32_t nlo_lo = base_lo + (uint32_t)iter_offset;
         uint32_t c0 = nlo_lo < base_lo ? 1u : 0u;
-        uint32_t nlo_hi = base_hi + c0;
-        uint32_t c1 = nlo_hi < base_hi ? 1u : 0u;
+        uint32_t iter_offset_hi = (uint32_t)(iter_offset >> 32);
+        uint32_t nlo_hi_tmp = base_hi + iter_offset_hi;
+        uint32_t c1a = nlo_hi_tmp < base_hi ? 1u : 0u;
+        uint32_t nlo_hi = nlo_hi_tmp + c0;
+        uint32_t c1b = nlo_hi < nlo_hi_tmp ? 1u : 0u;
+        uint32_t c1 = c1a | c1b;
         uint32_t nhi_lo = base_nhi_lo + c1;
         uint32_t c2 = nhi_lo < base_nhi_lo ? 1u : 0u;
         uint32_t nhi_hi = base_nhi_hi + c2;
@@ -538,6 +548,20 @@ static std::string hex_encode(const std::array<uint8_t, 32>& bytes) {
     return oss.str();
 }
 
+static std::string uint128_decimal(unsigned __int128 value) {
+    if (value == 0) return "0";
+    char buf[40]{};
+    int pos = 0;
+    while (value > 0) {
+        buf[pos++] = (char)('0' + (uint32_t)(value % 10));
+        value /= 10;
+    }
+    std::string out;
+    out.reserve((size_t)pos);
+    while (pos > 0) out.push_back(buf[--pos]);
+    return out;
+}
+
 static uint64_t env_u64(const char* name, uint64_t fallback) {
     const char* v = std::getenv(name);
     if (!v || !*v) return fallback;
@@ -588,8 +612,10 @@ int main(int argc, char** argv) {
 
     uint32_t block_threads = (uint32_t)env_u64("CUDA_BLOCK_THREADS", 256);
     uint32_t nonces_per_thread = (uint32_t)env_u64("CUDA_NONCES_PER_THREAD", 1);
+    uint32_t nonce_stride = (uint32_t)env_u64("CUDA_NONCE_STRIDE", 1);
     if (block_threads == 0) block_threads = 256;
     if (nonces_per_thread == 0) nonces_per_thread = 1;
+    if (nonce_stride == 0) nonce_stride = 1;
     uint32_t batch_log2 = (uint32_t)env_u64("CUDA_BATCH_LOG2", prop.major >= 9 ? 29 : 28);
     if (batch_log2 < 12) batch_log2 = 12;
     if (batch_log2 > 32) batch_log2 = 32;
@@ -599,8 +625,9 @@ int main(int argc, char** argv) {
     threads_per_dispatch -= threads_per_dispatch % block_threads;
     batch = threads_per_dispatch * nonces_per_thread;
     uint32_t grid_blocks = (uint32_t)(threads_per_dispatch / block_threads);
-    std::fprintf(stderr, "blocks=%u threads/block=%u batch=%lluM nonces/thread=%u\n",
-                 grid_blocks, block_threads, (unsigned long long)(batch / 1000000ULL), nonces_per_thread);
+    std::fprintf(stderr, "blocks=%u threads/block=%u batch=%lluM nonces/thread=%u stride=%u\n",
+                 grid_blocks, block_threads, (unsigned long long)(batch / 1000000ULL),
+                 nonces_per_thread, nonce_stride);
 
     auto challenge_words = le_words32(challenge_bytes);
     auto target_words = be_words32(difficulty_bytes);
@@ -639,11 +666,15 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(d_nonce_base, nonce_base, 4 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
         if (selftest) {
-            mine_kernel<1><<<1, 1>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1);
+            mine_kernel<1, 1><<<1, 1>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1, 1);
+        } else if (nonces_per_thread == 1 && nonce_stride == 1) {
+            mine_kernel<1, 1><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1, 1);
         } else if (nonces_per_thread == 1) {
-            mine_kernel<1><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1);
+            mine_kernel<1, 0><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1, nonce_stride);
+        } else if (nonce_stride == 1) {
+            mine_kernel<0, 1><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread, 1);
         } else {
-            mine_kernel<0><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread);
+            mine_kernel<0, 0><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread, nonce_stride);
         }
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -674,16 +705,13 @@ int main(int argc, char** argv) {
             if (selftest) {
                 std::fprintf(stderr, "selftest OK\n");
             } else {
-                if (nhi != 0) {
-                    std::fprintf(stderr, "nonce high 64 bits are non-zero; decimal output is truncated\n");
-                }
-                std::cout << (unsigned long long)nlo << "\n";
+                std::cout << uint128_decimal(nonce) << "\n";
             }
             return 0;
         }
 
         unsigned __int128 next = ((unsigned __int128)nonce_hi << 64) | nonce_lo;
-        next += (unsigned __int128)batch;
+        next += (unsigned __int128)batch * (unsigned __int128)nonce_stride;
         nonce_lo = (uint64_t)next;
         nonce_hi = (uint64_t)(next >> 64);
 

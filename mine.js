@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import os from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -209,6 +210,7 @@ function selectGpuBin() {
 }
 
 const GPU_BIN = selectGpuBin();
+const UINT64_SPACE = 1n << 64n;
 
 function miningWindowFor(epochBlocksLeft) {
   const avgBlockSeconds = Number(process.env.BLOCK_SECONDS || '12');
@@ -222,6 +224,49 @@ function miningWindowFor(epochBlocksLeft) {
     blocksLeft,
     safetyBlocks,
     timeoutSeconds: timeoutSeconds > 0 ? timeoutSeconds : 0,
+  };
+}
+
+function cudaDevices() {
+  if (!process.env.CUDA_DEVICES) return null;
+  const devices = process.env.CUDA_DEVICES
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+  for (const device of devices) {
+    if (!/^\d+$/.test(device)) throw new Error(`CUDA_DEVICES must contain numeric device ids, got ${device}`);
+  }
+  if (new Set(devices).size !== devices.length) {
+    throw new Error(`CUDA_DEVICES contains duplicate ids: ${process.env.CUDA_DEVICES}`);
+  }
+  return devices.length ? devices : null;
+}
+
+function randomUint64() {
+  const bytes = randomBytes(8);
+  let value = 0n;
+  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
+  return value;
+}
+
+function randomBelow(limit) {
+  if (limit <= 0n) return 0n;
+  const bound = UINT64_SPACE - (UINT64_SPACE % limit);
+  while (true) {
+    const value = randomUint64();
+    if (value < bound) return value % limit;
+  }
+}
+
+function writePrefixed(stream, prefix) {
+  let pending = '';
+  return (chunk) => {
+    pending += chunk.toString();
+    const lines = pending.split(/\r?\n/);
+    pending = lines.pop() || '';
+    for (const line of lines) {
+      if (line) stream.write(`${prefix}${line}\n`);
+    }
   };
 }
 
@@ -239,8 +284,21 @@ function findNonceGPU(challenge, difficulty, miningWindow, monitor) {
   return new Promise((resolve, reject) => {
     const args = [challenge, diffHex];
     if (timeoutSeconds) args.push(`--timeout-seconds=${timeoutSeconds}`);
-    const proc = spawn(GPU_BIN, args, { stdio: ['ignore', 'pipe', 'inherit'] });
-    let out = '';
+    const devices = cudaDevices();
+    const miners = devices || [process.env.CUDA_DEVICE || '0'];
+    const multiGpu = miners.length > 1;
+    const stride = multiGpu ? miners.length : Number(process.env.CUDA_NONCE_STRIDE || '1');
+    const sharedNonceBase = multiGpu
+      ? randomBelow(UINT64_SPACE - BigInt(miners.length))
+      : null;
+    if (multiGpu) {
+      console.log(`→ CUDA multi-GPU: devices=${miners.join(',')} stride=${stride}`);
+    }
+
+    const procs = [];
+    const outputs = new Map();
+    let live = miners.length;
+    let lastError = null;
     let done = false;
     let timer = null;
     let epochPoller = null;
@@ -253,10 +311,12 @@ function findNonceGPU(challenge, difficulty, miningWindow, monitor) {
       if (done) return;
       done = true;
       cleanup();
+      for (const child of procs) {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      }
       fn(value);
     };
     const stopMining = (err) => {
-      if (proc.exitCode === null) proc.kill('SIGTERM');
       settle(reject, err);
     };
 
@@ -284,15 +344,56 @@ function findNonceGPU(challenge, difficulty, miningWindow, monitor) {
       }, pollSeconds * 1000);
     }
 
-    proc.stdout.on('data', (chunk) => { out += chunk.toString(); });
-    proc.on('error', (e) => settle(reject, e));
-    proc.on('exit', (code) => {
-      if (done) return;
-      const nonce = out.trim().split('\n').pop();
-      if (code !== 0) return settle(reject, new Error(`gpu-miner exited ${code}`));
-      if ((!nonce || !/^\d+$/.test(nonce)) && timeoutSeconds) return settle(reject, new MiningTimedOut(timeoutSeconds));
-      if (!nonce || !/^\d+$/.test(nonce)) return settle(reject, new Error(`bad nonce output: ${JSON.stringify(out)}`));
-      settle(resolve, nonce);
+    miners.forEach((device, index) => {
+      const env = { ...process.env, CUDA_DEVICE: device };
+      if (multiGpu) {
+        env.CUDA_NONCE_LO = (sharedNonceBase + BigInt(index)).toString();
+        env.CUDA_NONCE_HI = '0';
+        env.CUDA_NONCE_STRIDE = String(stride);
+      }
+      const child = spawn(GPU_BIN, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const prefix = multiGpu ? `[gpu ${device}] ` : '';
+      let childDone = false;
+      const markChildDone = () => {
+        if (childDone) return false;
+        childDone = true;
+        live -= 1;
+        return true;
+      };
+      procs.push(child);
+      outputs.set(child, '');
+
+      child.stdout.on('data', (chunk) => {
+        outputs.set(child, outputs.get(child) + chunk.toString());
+      });
+      child.stderr.on('data', prefix ? writePrefixed(process.stderr, prefix) : (chunk) => {
+        process.stderr.write(chunk);
+      });
+      child.on('error', (e) => {
+        if (!markChildDone()) return;
+        lastError = e;
+        if (!done && live === 0) settle(reject, lastError);
+      });
+      child.on('exit', (code, signal) => {
+        if (done) return;
+        if (!markChildDone()) return;
+        const out = outputs.get(child) || '';
+        const nonce = out.trim().split('\n').pop();
+        if (code === 0 && nonce && /^\d+$/.test(nonce)) {
+          settle(resolve, nonce);
+          return;
+        }
+        if (code !== 0) {
+          lastError = new Error(`gpu-miner on CUDA_DEVICE=${device} exited ${code ?? signal}`);
+        } else if (nonce && !/^\d+$/.test(nonce)) {
+          lastError = new Error(`bad nonce output from CUDA_DEVICE=${device}: ${JSON.stringify(out)}`);
+        } else if (!lastError && timeoutSeconds) {
+          lastError = new MiningTimedOut(timeoutSeconds);
+        }
+        if (live === 0) {
+          settle(reject, lastError || new Error('all GPU miners exited without a nonce'));
+        }
+      });
     });
   });
 }
