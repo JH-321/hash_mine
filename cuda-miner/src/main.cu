@@ -144,6 +144,94 @@ __device__ __forceinline__ void keccakf(U64x* s) {
     }
 }
 
+__device__ __forceinline__ void keccakf_regs(
+    U64x& a00, U64x& a10, U64x& a20, U64x& a30, U64x& a40,
+    U64x& a01, U64x& a11, U64x& a21, U64x& a31, U64x& a41,
+    U64x& a02, U64x& a12, U64x& a22, U64x& a32, U64x& a42,
+    U64x& a03, U64x& a13, U64x& a23, U64x& a33, U64x& a43,
+    U64x& a04, U64x& a14, U64x& a24, U64x& a34, U64x& a44
+) {
+#pragma unroll 24
+    for (uint32_t round = 0; round < 24; round++) {
+        U64x c0 = xor64(xor64(xor64(xor64(a00, a01), a02), a03), a04);
+        U64x c1 = xor64(xor64(xor64(xor64(a10, a11), a12), a13), a14);
+        U64x c2 = xor64(xor64(xor64(xor64(a20, a21), a22), a23), a24);
+        U64x c3 = xor64(xor64(xor64(xor64(a30, a31), a32), a33), a34);
+        U64x c4 = xor64(xor64(xor64(xor64(a40, a41), a42), a43), a44);
+
+        U64x d0 = xor64(c4, rotl64(c1, 1));
+        U64x d1 = xor64(c0, rotl64(c2, 1));
+        U64x d2 = xor64(c1, rotl64(c3, 1));
+        U64x d3 = xor64(c2, rotl64(c4, 1));
+        U64x d4 = xor64(c3, rotl64(c0, 1));
+
+        a00 = xor64(a00, d0); a01 = xor64(a01, d0); a02 = xor64(a02, d0); a03 = xor64(a03, d0); a04 = xor64(a04, d0);
+        a10 = xor64(a10, d1); a11 = xor64(a11, d1); a12 = xor64(a12, d1); a13 = xor64(a13, d1); a14 = xor64(a14, d1);
+        a20 = xor64(a20, d2); a21 = xor64(a21, d2); a22 = xor64(a22, d2); a23 = xor64(a23, d2); a24 = xor64(a24, d2);
+        a30 = xor64(a30, d3); a31 = xor64(a31, d3); a32 = xor64(a32, d3); a33 = xor64(a33, d3); a34 = xor64(a34, d3);
+        a40 = xor64(a40, d4); a41 = xor64(a41, d4); a42 = xor64(a42, d4); a43 = xor64(a43, d4); a44 = xor64(a44, d4);
+
+        U64x b00 = rotl64(a00, 0);
+        U64x b13 = rotl64(a01, 36);
+        U64x b21 = rotl64(a02, 3);
+        U64x b34 = rotl64(a03, 41);
+        U64x b42 = rotl64(a04, 18);
+        U64x b02 = rotl64(a10, 1);
+        U64x b10 = rotl64(a11, 44);
+        U64x b23 = rotl64(a12, 10);
+        U64x b31 = rotl64(a13, 45);
+        U64x b44 = rotl64(a14, 2);
+        U64x b04 = rotl64(a20, 62);
+        U64x b12 = rotl64(a21, 6);
+        U64x b20 = rotl64(a22, 43);
+        U64x b33 = rotl64(a23, 15);
+        U64x b41 = rotl64(a24, 61);
+        U64x b01 = rotl64(a30, 28);
+        U64x b14 = rotl64(a31, 55);
+        U64x b22 = rotl64(a32, 25);
+        U64x b30 = rotl64(a33, 21);
+        U64x b43 = rotl64(a34, 56);
+        U64x b03 = rotl64(a40, 27);
+        U64x b11 = rotl64(a41, 20);
+        U64x b24 = rotl64(a42, 39);
+        U64x b32 = rotl64(a43, 8);
+        U64x b40 = rotl64(a44, 14);
+
+        a00 = xor64(b00, and64(not64(b10), b20));
+        a10 = xor64(b10, and64(not64(b20), b30));
+        a20 = xor64(b20, and64(not64(b30), b40));
+        a30 = xor64(b30, and64(not64(b40), b00));
+        a40 = xor64(b40, and64(not64(b00), b10));
+
+        a01 = xor64(b01, and64(not64(b11), b21));
+        a11 = xor64(b11, and64(not64(b21), b31));
+        a21 = xor64(b21, and64(not64(b31), b41));
+        a31 = xor64(b31, and64(not64(b41), b01));
+        a41 = xor64(b41, and64(not64(b01), b11));
+
+        a02 = xor64(b02, and64(not64(b12), b22));
+        a12 = xor64(b12, and64(not64(b22), b32));
+        a22 = xor64(b22, and64(not64(b32), b42));
+        a32 = xor64(b32, and64(not64(b42), b02));
+        a42 = xor64(b42, and64(not64(b02), b12));
+
+        a03 = xor64(b03, and64(not64(b13), b23));
+        a13 = xor64(b13, and64(not64(b23), b33));
+        a23 = xor64(b23, and64(not64(b33), b43));
+        a33 = xor64(b33, and64(not64(b43), b03));
+        a43 = xor64(b43, and64(not64(b03), b13));
+
+        a04 = xor64(b04, and64(not64(b14), b24));
+        a14 = xor64(b14, and64(not64(b24), b34));
+        a24 = xor64(b24, and64(not64(b34), b44));
+        a34 = xor64(b34, and64(not64(b44), b04));
+        a44 = xor64(b44, and64(not64(b04), b14));
+
+        a00.lo ^= K_RC_LO[round];
+        a00.hi ^= K_RC_HI[round];
+    }
+}
+
 __global__ void mine_kernel(
     const uint32_t* __restrict__ challenge,
     const uint32_t* __restrict__ target,
@@ -179,44 +267,53 @@ __global__ void mine_kernel(
         uint32_t c2 = nhi_lo < base_nhi_lo ? 1u : 0u;
         uint32_t nhi_hi = base_nhi_hi + c2;
 
-        U64x s[25];
-#pragma unroll
-        for (int i = 0; i < 25; i++) s[i] = make_u64x(0, 0);
+        U64x a00 = make_u64x(challenge[0], challenge[1]);
+        U64x a10 = make_u64x(challenge[2], challenge[3]);
+        U64x a20 = make_u64x(challenge[4], challenge[5]);
+        U64x a30 = make_u64x(challenge[6], challenge[7]);
+        U64x a40 = make_u64x(0, 0);
+        U64x a01 = make_u64x(0, 0);
+        U64x a11 = make_u64x(bswap32(nhi_hi), bswap32(nhi_lo));
+        U64x a21 = make_u64x(bswap32(nlo_hi), bswap32(nlo_lo));
+        U64x a31 = make_u64x(0x00000001u, 0);
+        U64x a41 = make_u64x(0, 0);
+        U64x a02 = make_u64x(0, 0);
+        U64x a12 = make_u64x(0, 0);
+        U64x a22 = make_u64x(0, 0);
+        U64x a32 = make_u64x(0, 0);
+        U64x a42 = make_u64x(0, 0);
+        U64x a03 = make_u64x(0, 0);
+        U64x a13 = make_u64x(0, 0x80000000u);
+        U64x a23 = make_u64x(0, 0);
+        U64x a33 = make_u64x(0, 0);
+        U64x a43 = make_u64x(0, 0);
+        U64x a04 = make_u64x(0, 0);
+        U64x a14 = make_u64x(0, 0);
+        U64x a24 = make_u64x(0, 0);
+        U64x a34 = make_u64x(0, 0);
+        U64x a44 = make_u64x(0, 0);
 
-        s[0] = make_u64x(challenge[0], challenge[1]);
-        s[1] = make_u64x(challenge[2], challenge[3]);
-        s[2] = make_u64x(challenge[4], challenge[5]);
-        s[3] = make_u64x(challenge[6], challenge[7]);
+        keccakf_regs(
+            a00, a10, a20, a30, a40,
+            a01, a11, a21, a31, a41,
+            a02, a12, a22, a32, a42,
+            a03, a13, a23, a33, a43,
+            a04, a14, a24, a34, a44
+        );
 
-        s[6] = make_u64x(bswap32(nhi_hi), bswap32(nhi_lo));
-        s[7] = make_u64x(bswap32(nlo_hi), bswap32(nlo_lo));
-        s[8].lo = 0x00000001u;
-        s[16].hi = 0x80000000u;
-
-        keccakf(s);
-
-        bool decided = false;
-        bool less = false;
-#pragma unroll
-        for (int i = 0; i < 4 && !decided; i++) {
-            uint32_t h_hi = bswap32(s[i].lo);
-            uint32_t h_lo = bswap32(s[i].hi);
-            uint32_t t_hi = target[i * 2];
-            uint32_t t_lo = target[i * 2 + 1];
-            if (h_hi < t_hi) {
-                less = true;
-                decided = true;
-            } else if (h_hi > t_hi) {
-                less = false;
-                decided = true;
-            } else if (h_lo < t_lo) {
-                less = true;
-                decided = true;
-            } else if (h_lo > t_lo) {
-                less = false;
-                decided = true;
-            }
-        }
+        uint32_t h0 = bswap32(a00.lo), h1 = bswap32(a00.hi);
+        uint32_t h2 = bswap32(a10.lo), h3 = bswap32(a10.hi);
+        uint32_t h4 = bswap32(a20.lo), h5 = bswap32(a20.hi);
+        uint32_t h6 = bswap32(a30.lo), h7 = bswap32(a30.hi);
+        bool less =
+            (h0 < target[0]) || (h0 == target[0] && (
+            (h1 < target[1]) || (h1 == target[1] && (
+            (h2 < target[2]) || (h2 == target[2] && (
+            (h3 < target[3]) || (h3 == target[3] && (
+            (h4 < target[4]) || (h4 == target[4] && (
+            (h5 < target[5]) || (h5 == target[5] && (
+            (h6 < target[6]) || (h6 == target[6] && h7 < target[7])
+            ))))))))))));
 
         if (less) {
             if (atomicCAS(found, 0u, 1u) == 0u) {
