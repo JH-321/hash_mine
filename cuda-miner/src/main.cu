@@ -175,11 +175,11 @@ __device__ __forceinline__ void keccakf_regs(
         U64x c3 = xor64(xor64(xor64(xor64(a30, a31), a32), a33), a34);
         U64x c4 = xor64(xor64(xor64(xor64(a40, a41), a42), a43), a44);
 
-        U64x d0 = xor64(c4, rotl64(c1, 1));
-        U64x d1 = xor64(c0, rotl64(c2, 1));
-        U64x d2 = xor64(c1, rotl64(c3, 1));
-        U64x d3 = xor64(c2, rotl64(c4, 1));
-        U64x d4 = xor64(c3, rotl64(c0, 1));
+        U64x d0 = xor64(c4, rotl64c<1>(c1));
+        U64x d1 = xor64(c0, rotl64c<1>(c2));
+        U64x d2 = xor64(c1, rotl64c<1>(c3));
+        U64x d3 = xor64(c2, rotl64c<1>(c4));
+        U64x d4 = xor64(c3, rotl64c<1>(c0));
 
         a00 = xor64(a00, d0); a01 = xor64(a01, d0); a02 = xor64(a02, d0); a03 = xor64(a03, d0); a04 = xor64(a04, d0);
         a10 = xor64(a10, d1); a11 = xor64(a11, d1); a12 = xor64(a12, d1); a13 = xor64(a13, d1); a14 = xor64(a14, d1);
