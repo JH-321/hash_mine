@@ -52,21 +52,6 @@ __device__ __forceinline__ uint32_t bswap32(uint32_t x) {
     return __byte_perm(x, 0, 0x0123);
 }
 
-__device__ __forceinline__ U64x rotl64(U64x x, uint32_t n) {
-    if (n == 0) {
-        return x;
-    } else if (n < 32) {
-        return make_u64x((x.lo << n) | (x.hi >> (32 - n)),
-                         (x.hi << n) | (x.lo >> (32 - n)));
-    } else if (n == 32) {
-        return make_u64x(x.hi, x.lo);
-    } else {
-        uint32_t r = n - 32;
-        return make_u64x((x.hi << r) | (x.lo >> (32 - r)),
-                         (x.lo << r) | (x.hi >> (32 - r)));
-    }
-}
-
 template <uint32_t N>
 __device__ __forceinline__ U64x rotl64c(U64x x) {
     if constexpr (N == 0) {
@@ -83,83 +68,90 @@ __device__ __forceinline__ U64x rotl64c(U64x x) {
     }
 }
 
-__constant__ uint32_t K_RC_LO[24] = {
-    0x00000001u, 0x00008082u, 0x0000808au, 0x80008000u,
-    0x0000808bu, 0x80000001u, 0x80008081u, 0x00008009u,
-    0x0000008au, 0x00000088u, 0x80008009u, 0x8000000au,
-    0x8000808bu, 0x0000008bu, 0x00008089u, 0x00008003u,
-    0x00008002u, 0x00000080u, 0x0000800au, 0x8000000au,
-    0x80008081u, 0x00008080u, 0x80000001u, 0x80008008u
-};
+template <uint32_t RC_LO, uint32_t RC_HI>
+__device__ __forceinline__ void keccak_round_regs(
+    U64x& a00, U64x& a10, U64x& a20, U64x& a30, U64x& a40,
+    U64x& a01, U64x& a11, U64x& a21, U64x& a31, U64x& a41,
+    U64x& a02, U64x& a12, U64x& a22, U64x& a32, U64x& a42,
+    U64x& a03, U64x& a13, U64x& a23, U64x& a33, U64x& a43,
+    U64x& a04, U64x& a14, U64x& a24, U64x& a34, U64x& a44
+) {
+    U64x c0 = xor64(xor64(xor64(xor64(a00, a01), a02), a03), a04);
+    U64x c1 = xor64(xor64(xor64(xor64(a10, a11), a12), a13), a14);
+    U64x c2 = xor64(xor64(xor64(xor64(a20, a21), a22), a23), a24);
+    U64x c3 = xor64(xor64(xor64(xor64(a30, a31), a32), a33), a34);
+    U64x c4 = xor64(xor64(xor64(xor64(a40, a41), a42), a43), a44);
 
-__constant__ uint32_t K_RC_HI[24] = {
-    0x00000000u, 0x00000000u, 0x80000000u, 0x80000000u,
-    0x00000000u, 0x00000000u, 0x80000000u, 0x80000000u,
-    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-    0x00000000u, 0x80000000u, 0x80000000u, 0x80000000u,
-    0x80000000u, 0x80000000u, 0x00000000u, 0x80000000u,
-    0x80000000u, 0x80000000u, 0x00000000u, 0x80000000u
-};
+    U64x d0 = xor64(c4, rotl64c<1>(c1));
+    U64x d1 = xor64(c0, rotl64c<1>(c2));
+    U64x d2 = xor64(c1, rotl64c<1>(c3));
+    U64x d3 = xor64(c2, rotl64c<1>(c4));
+    U64x d4 = xor64(c3, rotl64c<1>(c0));
 
-__constant__ uint32_t K_ROT[25] = {
-     0,  1, 62, 28, 27,
-    36, 44,  6, 55, 20,
-     3, 10, 43, 25, 39,
-    41, 45, 15, 21,  8,
-    18,  2, 61, 56, 14
-};
+    a00 = xor64(a00, d0); a01 = xor64(a01, d0); a02 = xor64(a02, d0); a03 = xor64(a03, d0); a04 = xor64(a04, d0);
+    a10 = xor64(a10, d1); a11 = xor64(a11, d1); a12 = xor64(a12, d1); a13 = xor64(a13, d1); a14 = xor64(a14, d1);
+    a20 = xor64(a20, d2); a21 = xor64(a21, d2); a22 = xor64(a22, d2); a23 = xor64(a23, d2); a24 = xor64(a24, d2);
+    a30 = xor64(a30, d3); a31 = xor64(a31, d3); a32 = xor64(a32, d3); a33 = xor64(a33, d3); a34 = xor64(a34, d3);
+    a40 = xor64(a40, d4); a41 = xor64(a41, d4); a42 = xor64(a42, d4); a43 = xor64(a43, d4); a44 = xor64(a44, d4);
 
-__device__ __forceinline__ void keccakf(U64x* s) {
-#pragma unroll 24
-    for (uint32_t round = 0; round < 24; round++) {
-        U64x c0 = xor64(xor64(xor64(xor64(s[0], s[5]), s[10]), s[15]), s[20]);
-        U64x c1 = xor64(xor64(xor64(xor64(s[1], s[6]), s[11]), s[16]), s[21]);
-        U64x c2 = xor64(xor64(xor64(xor64(s[2], s[7]), s[12]), s[17]), s[22]);
-        U64x c3 = xor64(xor64(xor64(xor64(s[3], s[8]), s[13]), s[18]), s[23]);
-        U64x c4 = xor64(xor64(xor64(xor64(s[4], s[9]), s[14]), s[19]), s[24]);
+    U64x b00 = rotl64c<0>(a00);
+    U64x b13 = rotl64c<36>(a01);
+    U64x b21 = rotl64c<3>(a02);
+    U64x b34 = rotl64c<41>(a03);
+    U64x b42 = rotl64c<18>(a04);
+    U64x b02 = rotl64c<1>(a10);
+    U64x b10 = rotl64c<44>(a11);
+    U64x b23 = rotl64c<10>(a12);
+    U64x b31 = rotl64c<45>(a13);
+    U64x b44 = rotl64c<2>(a14);
+    U64x b04 = rotl64c<62>(a20);
+    U64x b12 = rotl64c<6>(a21);
+    U64x b20 = rotl64c<43>(a22);
+    U64x b33 = rotl64c<15>(a23);
+    U64x b41 = rotl64c<61>(a24);
+    U64x b01 = rotl64c<28>(a30);
+    U64x b14 = rotl64c<55>(a31);
+    U64x b22 = rotl64c<25>(a32);
+    U64x b30 = rotl64c<21>(a33);
+    U64x b43 = rotl64c<56>(a34);
+    U64x b03 = rotl64c<27>(a40);
+    U64x b11 = rotl64c<20>(a41);
+    U64x b24 = rotl64c<39>(a42);
+    U64x b32 = rotl64c<8>(a43);
+    U64x b40 = rotl64c<14>(a44);
 
-        U64x d0 = xor64(c4, rotl64c<1>(c1));
-        U64x d1 = xor64(c0, rotl64c<1>(c2));
-        U64x d2 = xor64(c1, rotl64c<1>(c3));
-        U64x d3 = xor64(c2, rotl64c<1>(c4));
-        U64x d4 = xor64(c3, rotl64c<1>(c0));
+    a00 = xor64(b00, and64(not64(b10), b20));
+    a10 = xor64(b10, and64(not64(b20), b30));
+    a20 = xor64(b20, and64(not64(b30), b40));
+    a30 = xor64(b30, and64(not64(b40), b00));
+    a40 = xor64(b40, and64(not64(b00), b10));
 
-#pragma unroll
-        for (int y = 0; y < 25; y += 5) {
-            s[y + 0] = xor64(s[y + 0], d0);
-            s[y + 1] = xor64(s[y + 1], d1);
-            s[y + 2] = xor64(s[y + 2], d2);
-            s[y + 3] = xor64(s[y + 3], d3);
-            s[y + 4] = xor64(s[y + 4], d4);
-        }
+    a01 = xor64(b01, and64(not64(b11), b21));
+    a11 = xor64(b11, and64(not64(b21), b31));
+    a21 = xor64(b21, and64(not64(b31), b41));
+    a31 = xor64(b31, and64(not64(b41), b01));
+    a41 = xor64(b41, and64(not64(b01), b11));
 
-        U64x b[25];
-#pragma unroll
-        for (uint32_t x = 0; x < 5; x++) {
-#pragma unroll
-            for (uint32_t y = 0; y < 5; y++) {
-                b[y + 5 * ((2 * x + 3 * y) % 5)] = rotl64(s[x + 5 * y], K_ROT[x + 5 * y]);
-            }
-        }
+    a02 = xor64(b02, and64(not64(b12), b22));
+    a12 = xor64(b12, and64(not64(b22), b32));
+    a22 = xor64(b22, and64(not64(b32), b42));
+    a32 = xor64(b32, and64(not64(b42), b02));
+    a42 = xor64(b42, and64(not64(b02), b12));
 
-#pragma unroll
-        for (uint32_t y = 0; y < 5; y++) {
-            uint32_t row = 5 * y;
-            U64x b0 = b[row + 0];
-            U64x b1 = b[row + 1];
-            U64x b2 = b[row + 2];
-            U64x b3 = b[row + 3];
-            U64x b4 = b[row + 4];
-            s[row + 0] = xor64(b0, and64(not64(b1), b2));
-            s[row + 1] = xor64(b1, and64(not64(b2), b3));
-            s[row + 2] = xor64(b2, and64(not64(b3), b4));
-            s[row + 3] = xor64(b3, and64(not64(b4), b0));
-            s[row + 4] = xor64(b4, and64(not64(b0), b1));
-        }
+    a03 = xor64(b03, and64(not64(b13), b23));
+    a13 = xor64(b13, and64(not64(b23), b33));
+    a23 = xor64(b23, and64(not64(b33), b43));
+    a33 = xor64(b33, and64(not64(b43), b03));
+    a43 = xor64(b43, and64(not64(b03), b13));
 
-        s[0].lo ^= K_RC_LO[round];
-        s[0].hi ^= K_RC_HI[round];
-    }
+    a04 = xor64(b04, and64(not64(b14), b24));
+    a14 = xor64(b14, and64(not64(b24), b34));
+    a24 = xor64(b24, and64(not64(b34), b44));
+    a34 = xor64(b34, and64(not64(b44), b04));
+    a44 = xor64(b44, and64(not64(b04), b14));
+
+    a00.lo ^= RC_LO;
+    a00.hi ^= RC_HI;
 }
 
 __device__ __forceinline__ void keccakf_regs(
@@ -169,85 +161,30 @@ __device__ __forceinline__ void keccakf_regs(
     U64x& a03, U64x& a13, U64x& a23, U64x& a33, U64x& a43,
     U64x& a04, U64x& a14, U64x& a24, U64x& a34, U64x& a44
 ) {
-#pragma unroll 24
-    for (uint32_t round = 0; round < 24; round++) {
-        U64x c0 = xor64(xor64(xor64(xor64(a00, a01), a02), a03), a04);
-        U64x c1 = xor64(xor64(xor64(xor64(a10, a11), a12), a13), a14);
-        U64x c2 = xor64(xor64(xor64(xor64(a20, a21), a22), a23), a24);
-        U64x c3 = xor64(xor64(xor64(xor64(a30, a31), a32), a33), a34);
-        U64x c4 = xor64(xor64(xor64(xor64(a40, a41), a42), a43), a44);
-
-        U64x d0 = xor64(c4, rotl64c<1>(c1));
-        U64x d1 = xor64(c0, rotl64c<1>(c2));
-        U64x d2 = xor64(c1, rotl64c<1>(c3));
-        U64x d3 = xor64(c2, rotl64c<1>(c4));
-        U64x d4 = xor64(c3, rotl64c<1>(c0));
-
-        a00 = xor64(a00, d0); a01 = xor64(a01, d0); a02 = xor64(a02, d0); a03 = xor64(a03, d0); a04 = xor64(a04, d0);
-        a10 = xor64(a10, d1); a11 = xor64(a11, d1); a12 = xor64(a12, d1); a13 = xor64(a13, d1); a14 = xor64(a14, d1);
-        a20 = xor64(a20, d2); a21 = xor64(a21, d2); a22 = xor64(a22, d2); a23 = xor64(a23, d2); a24 = xor64(a24, d2);
-        a30 = xor64(a30, d3); a31 = xor64(a31, d3); a32 = xor64(a32, d3); a33 = xor64(a33, d3); a34 = xor64(a34, d3);
-        a40 = xor64(a40, d4); a41 = xor64(a41, d4); a42 = xor64(a42, d4); a43 = xor64(a43, d4); a44 = xor64(a44, d4);
-
-        U64x b00 = rotl64c<0>(a00);
-        U64x b13 = rotl64c<36>(a01);
-        U64x b21 = rotl64c<3>(a02);
-        U64x b34 = rotl64c<41>(a03);
-        U64x b42 = rotl64c<18>(a04);
-        U64x b02 = rotl64c<1>(a10);
-        U64x b10 = rotl64c<44>(a11);
-        U64x b23 = rotl64c<10>(a12);
-        U64x b31 = rotl64c<45>(a13);
-        U64x b44 = rotl64c<2>(a14);
-        U64x b04 = rotl64c<62>(a20);
-        U64x b12 = rotl64c<6>(a21);
-        U64x b20 = rotl64c<43>(a22);
-        U64x b33 = rotl64c<15>(a23);
-        U64x b41 = rotl64c<61>(a24);
-        U64x b01 = rotl64c<28>(a30);
-        U64x b14 = rotl64c<55>(a31);
-        U64x b22 = rotl64c<25>(a32);
-        U64x b30 = rotl64c<21>(a33);
-        U64x b43 = rotl64c<56>(a34);
-        U64x b03 = rotl64c<27>(a40);
-        U64x b11 = rotl64c<20>(a41);
-        U64x b24 = rotl64c<39>(a42);
-        U64x b32 = rotl64c<8>(a43);
-        U64x b40 = rotl64c<14>(a44);
-
-        a00 = xor64(b00, and64(not64(b10), b20));
-        a10 = xor64(b10, and64(not64(b20), b30));
-        a20 = xor64(b20, and64(not64(b30), b40));
-        a30 = xor64(b30, and64(not64(b40), b00));
-        a40 = xor64(b40, and64(not64(b00), b10));
-
-        a01 = xor64(b01, and64(not64(b11), b21));
-        a11 = xor64(b11, and64(not64(b21), b31));
-        a21 = xor64(b21, and64(not64(b31), b41));
-        a31 = xor64(b31, and64(not64(b41), b01));
-        a41 = xor64(b41, and64(not64(b01), b11));
-
-        a02 = xor64(b02, and64(not64(b12), b22));
-        a12 = xor64(b12, and64(not64(b22), b32));
-        a22 = xor64(b22, and64(not64(b32), b42));
-        a32 = xor64(b32, and64(not64(b42), b02));
-        a42 = xor64(b42, and64(not64(b02), b12));
-
-        a03 = xor64(b03, and64(not64(b13), b23));
-        a13 = xor64(b13, and64(not64(b23), b33));
-        a23 = xor64(b23, and64(not64(b33), b43));
-        a33 = xor64(b33, and64(not64(b43), b03));
-        a43 = xor64(b43, and64(not64(b03), b13));
-
-        a04 = xor64(b04, and64(not64(b14), b24));
-        a14 = xor64(b14, and64(not64(b24), b34));
-        a24 = xor64(b24, and64(not64(b34), b44));
-        a34 = xor64(b34, and64(not64(b44), b04));
-        a44 = xor64(b44, and64(not64(b04), b14));
-
-        a00.lo ^= K_RC_LO[round];
-        a00.hi ^= K_RC_HI[round];
-    }
+    keccak_round_regs<0x00000001u, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00008082u, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x0000808au, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x80008000u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x0000808bu, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x80000001u, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x80008081u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00008009u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x0000008au, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00000088u, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x80008009u, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x8000000au, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x8000808bu, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x0000008bu, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00008089u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00008003u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00008002u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00000080u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x0000800au, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x8000000au, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x80008081u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x00008080u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x80000001u, 0x00000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
+    keccak_round_regs<0x80008008u, 0x80000000u>(a00, a10, a20, a30, a40, a01, a11, a21, a31, a41, a02, a12, a22, a32, a42, a03, a13, a23, a33, a43, a04, a14, a24, a34, a44);
 }
 
 template <bool NONCE_HI_ZERO>
