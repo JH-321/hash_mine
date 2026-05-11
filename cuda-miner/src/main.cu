@@ -91,9 +91,6 @@ __constant__ uint32_t K_ROT[25] = {
     18,  2, 61, 56, 14
 };
 
-__constant__ uint32_t K_CHALLENGE[8];
-__constant__ uint32_t K_TARGET[8];
-
 __device__ __forceinline__ void keccakf(U64x* s) {
 #pragma unroll 24
     for (uint32_t round = 0; round < 24; round++) {
@@ -147,71 +144,16 @@ __device__ __forceinline__ void keccakf(U64x* s) {
     }
 }
 
-__device__ __forceinline__ void test_nonce(
-    uint32_t nlo_lo,
-    uint32_t nlo_hi,
-    uint32_t nhi_lo,
-    uint32_t nhi_hi,
-    uint32_t* __restrict__ found,
-    uint32_t* __restrict__ result
-) {
-    U64x s[25];
-#pragma unroll
-    for (int i = 0; i < 25; i++) s[i] = make_u64x(0, 0);
-
-    s[0] = make_u64x(K_CHALLENGE[0], K_CHALLENGE[1]);
-    s[1] = make_u64x(K_CHALLENGE[2], K_CHALLENGE[3]);
-    s[2] = make_u64x(K_CHALLENGE[4], K_CHALLENGE[5]);
-    s[3] = make_u64x(K_CHALLENGE[6], K_CHALLENGE[7]);
-
-    s[6] = make_u64x(bswap32(nhi_hi), bswap32(nhi_lo));
-    s[7] = make_u64x(bswap32(nlo_hi), bswap32(nlo_lo));
-    s[8].lo = 0x00000001u;
-    s[16].hi = 0x80000000u;
-
-    keccakf(s);
-
-    bool decided = false;
-    bool less = false;
-#pragma unroll
-    for (int i = 0; i < 4 && !decided; i++) {
-        uint32_t h_hi = bswap32(s[i].lo);
-        uint32_t h_lo = bswap32(s[i].hi);
-        uint32_t t_hi = K_TARGET[i * 2];
-        uint32_t t_lo = K_TARGET[i * 2 + 1];
-        if (h_hi < t_hi) {
-            less = true;
-            decided = true;
-        } else if (h_hi > t_hi) {
-            less = false;
-            decided = true;
-        } else if (h_lo < t_lo) {
-            less = true;
-            decided = true;
-        } else if (h_lo > t_lo) {
-            less = false;
-            decided = true;
-        }
-    }
-
-    if (less) {
-        if (atomicCAS(found, 0u, 1u) == 0u) {
-            result[0] = nlo_lo;
-            result[1] = nlo_hi;
-            result[2] = nhi_lo;
-            result[3] = nhi_hi;
-        }
-    }
-}
-
-template <uint32_t NONCES_PER_THREAD>
-__global__ void mine_kernel_t(
+__global__ void mine_kernel(
+    const uint32_t* __restrict__ challenge,
+    const uint32_t* __restrict__ target,
     const uint32_t* __restrict__ nonce_base,
     uint32_t* __restrict__ found,
-    uint32_t* __restrict__ result
+    uint32_t* __restrict__ result,
+    uint32_t nonces_per_thread
 ) {
     uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t offset = tid * (uint64_t)NONCES_PER_THREAD;
+    uint64_t offset = tid * (uint64_t)nonces_per_thread;
 
     uint32_t base_lo = nonce_base[0] + (uint32_t)offset;
     uint32_t carry0 = base_lo < nonce_base[0] ? 1u : 0u;
@@ -225,11 +167,10 @@ __global__ void mine_kernel_t(
     uint32_t carry2 = base_nhi_lo < nonce_base[2] ? 1u : 0u;
     uint32_t base_nhi_hi = nonce_base[3] + carry2;
 
-#pragma unroll
-    for (uint32_t iter = 0; iter < NONCES_PER_THREAD; iter++) {
-        if constexpr (NONCES_PER_THREAD > 1) {
-            if (*found != 0u) return;
-        }
+#pragma unroll 1
+    for (uint32_t iter = 0; iter < nonces_per_thread; iter++) {
+        if (*found != 0u) return;
+
         uint32_t nlo_lo = base_lo + iter;
         uint32_t c0 = nlo_lo < base_lo ? 1u : 0u;
         uint32_t nlo_hi = base_hi + c0;
@@ -238,10 +179,52 @@ __global__ void mine_kernel_t(
         uint32_t c2 = nhi_lo < base_nhi_lo ? 1u : 0u;
         uint32_t nhi_hi = base_nhi_hi + c2;
 
-        test_nonce(nlo_lo, nlo_hi, nhi_lo, nhi_hi, found, result);
-        if constexpr (NONCES_PER_THREAD > 1) {
-            if (*found != 0u) return;
-        } else {
+        U64x s[25];
+#pragma unroll
+        for (int i = 0; i < 25; i++) s[i] = make_u64x(0, 0);
+
+        s[0] = make_u64x(challenge[0], challenge[1]);
+        s[1] = make_u64x(challenge[2], challenge[3]);
+        s[2] = make_u64x(challenge[4], challenge[5]);
+        s[3] = make_u64x(challenge[6], challenge[7]);
+
+        s[6] = make_u64x(bswap32(nhi_hi), bswap32(nhi_lo));
+        s[7] = make_u64x(bswap32(nlo_hi), bswap32(nlo_lo));
+        s[8].lo = 0x00000001u;
+        s[16].hi = 0x80000000u;
+
+        keccakf(s);
+
+        bool decided = false;
+        bool less = false;
+#pragma unroll
+        for (int i = 0; i < 4 && !decided; i++) {
+            uint32_t h_hi = bswap32(s[i].lo);
+            uint32_t h_lo = bswap32(s[i].hi);
+            uint32_t t_hi = target[i * 2];
+            uint32_t t_lo = target[i * 2 + 1];
+            if (h_hi < t_hi) {
+                less = true;
+                decided = true;
+            } else if (h_hi > t_hi) {
+                less = false;
+                decided = true;
+            } else if (h_lo < t_lo) {
+                less = true;
+                decided = true;
+            } else if (h_lo > t_lo) {
+                less = false;
+                decided = true;
+            }
+        }
+
+        if (less) {
+            if (atomicCAS(found, 0u, 1u) == 0u) {
+                result[0] = nlo_lo;
+                result[1] = nlo_hi;
+                result[2] = nhi_lo;
+                result[3] = nhi_hi;
+            }
             return;
         }
     }
@@ -441,12 +424,14 @@ int main(int argc, char** argv) {
         target_words = be_words32(difficulty_bytes);
     }
 
-    uint32_t *d_nonce_base = nullptr, *d_found = nullptr, *d_result = nullptr;
+    uint32_t *d_challenge = nullptr, *d_target = nullptr, *d_nonce_base = nullptr, *d_found = nullptr, *d_result = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_challenge, 8 * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_target, 8 * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc(&d_nonce_base, 4 * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc(&d_found, sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc(&d_result, 4 * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemcpyToSymbol(K_CHALLENGE, challenge_words.data(), 8 * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemcpyToSymbol(K_TARGET, target_words.data(), 8 * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemcpy(d_challenge, challenge_words.data(), 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_target, target_words.data(), 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     std::mt19937_64 rng((uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count());
     uint64_t nonce_lo = selftest ? 42ULL : rng();
@@ -469,25 +454,9 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(d_nonce_base, nonce_base, 4 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
         if (selftest) {
-            mine_kernel_t<1><<<1, 1>>>(d_nonce_base, d_found, d_result);
+            mine_kernel<<<1, 1>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1);
         } else {
-            switch (nonces_per_thread) {
-                case 1:
-                    mine_kernel_t<1><<<grid_blocks, block_threads>>>(d_nonce_base, d_found, d_result);
-                    break;
-                case 2:
-                    mine_kernel_t<2><<<grid_blocks, block_threads>>>(d_nonce_base, d_found, d_result);
-                    break;
-                case 4:
-                    mine_kernel_t<4><<<grid_blocks, block_threads>>>(d_nonce_base, d_found, d_result);
-                    break;
-                case 8:
-                    mine_kernel_t<8><<<grid_blocks, block_threads>>>(d_nonce_base, d_found, d_result);
-                    break;
-                default:
-                    std::fprintf(stderr, "CUDA_NONCES_PER_THREAD must be one of 1, 2, 4, or 8\n");
-                    return 2;
-            }
+            mine_kernel<<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread);
         }
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
