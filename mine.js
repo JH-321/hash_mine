@@ -75,6 +75,13 @@ class MiningTimedOut extends Error {
   }
 }
 
+class MiningWindowClosed extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'MiningWindowClosed';
+  }
+}
+
 function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
@@ -123,15 +130,20 @@ async function main() {
     const stateNow   = await readC.miningState();
     const difficulty = stateNow.difficulty;
     const blockNo    = await readProvider.getBlockNumber();
-    const miningTimeout = miningTimeoutSeconds(stateNow.epochBlocksLeft);
+    const miningWindow = miningWindowFor(stateNow.epochBlocksLeft);
     console.log(`\n[block ${blockNo}] challenge=${challenge.slice(0,10)}… difficulty=2^${256 - difficulty.toString(2).length} headroom`);
-    if (miningTimeout) console.log(`→ mining window: ${miningTimeout}s (${stateNow.epochBlocksLeft} blocks left)`);
+    if (miningWindow.timeoutSeconds) {
+      console.log(`→ mining window: ${miningWindow.timeoutSeconds}s (${miningWindow.blocksLeft} blocks left, guard ${miningWindow.safetyBlocks})`);
+    }
 
     let nonce;
     try {
-      nonce = await findNonce(challenge, difficulty, miningTimeout);
+      nonce = await findNonce(challenge, difficulty, miningWindow, {
+        readC,
+        startEpoch: stateNow.epoch.toString(),
+      });
     } catch (e) {
-      if (e instanceof MiningTimedOut) {
+      if (e instanceof MiningTimedOut || e instanceof MiningWindowClosed) {
         console.log(`↻ ${e.message}; refreshing challenge`);
         if (ONCE) return;
         await new Promise(r => setTimeout(r, 1000));
@@ -198,41 +210,89 @@ function selectGpuBin() {
 
 const GPU_BIN = selectGpuBin();
 
-function miningTimeoutSeconds(epochBlocksLeft) {
-  if (process.env.MINING_TIMEOUT_SECONDS) {
-    return Math.max(1, Number(process.env.MINING_TIMEOUT_SECONDS));
-  }
+function miningWindowFor(epochBlocksLeft) {
   const avgBlockSeconds = Number(process.env.BLOCK_SECONDS || '12');
   const safetyBlocks = Number(process.env.EPOCH_TIMEOUT_SAFETY_BLOCKS || '2');
   const blocksLeft = Number(epochBlocksLeft);
   const safeBlocks = Math.max(0, blocksLeft - safetyBlocks);
-  const seconds = Math.floor(safeBlocks * avgBlockSeconds);
-  return seconds > 0 ? seconds : 0;
+  const timeoutSeconds = process.env.MINING_TIMEOUT_SECONDS
+    ? Math.max(1, Number(process.env.MINING_TIMEOUT_SECONDS))
+    : Math.floor(safeBlocks * avgBlockSeconds);
+  return {
+    blocksLeft,
+    safetyBlocks,
+    timeoutSeconds: timeoutSeconds > 0 ? timeoutSeconds : 0,
+  };
 }
 
-async function findNonce(challenge, difficulty, timeoutSeconds) {
-  if (existsSync(GPU_BIN)) return findNonceGPU(challenge, difficulty, timeoutSeconds);
+async function findNonce(challenge, difficulty, miningWindow, monitor) {
+  if (existsSync(GPU_BIN)) return findNonceGPU(challenge, difficulty, miningWindow, monitor);
   console.log('GPU miner not found, falling back to CPU workers (slow).');
   console.log('Build CUDA with: cd cuda-miner && make');
   console.log('Build Metal with: cd gpu-miner && cargo build --release');
-  return findNonceCPU(challenge, difficulty, timeoutSeconds);
+  return findNonceCPU(challenge, difficulty, miningWindow.timeoutSeconds);
 }
 
-function findNonceGPU(challenge, difficulty, timeoutSeconds) {
+function findNonceGPU(challenge, difficulty, miningWindow, monitor) {
   const diffHex = '0x' + difficulty.toString(16).padStart(64, '0');
+  const timeoutSeconds = miningWindow.timeoutSeconds;
   return new Promise((resolve, reject) => {
     const args = [challenge, diffHex];
     if (timeoutSeconds) args.push(`--timeout-seconds=${timeoutSeconds}`);
     const proc = spawn(GPU_BIN, args, { stdio: ['ignore', 'pipe', 'inherit'] });
     let out = '';
+    let done = false;
+    let timer = null;
+    let epochPoller = null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (epochPoller) clearInterval(epochPoller);
+    };
+    const settle = (fn, value) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      fn(value);
+    };
+    const stopMining = (err) => {
+      if (proc.exitCode === null) proc.kill('SIGTERM');
+      settle(reject, err);
+    };
+
+    if (timeoutSeconds) {
+      timer = setTimeout(() => {
+        stopMining(new MiningTimedOut(timeoutSeconds));
+      }, timeoutSeconds * 1000);
+    }
+
+    const pollSeconds = Math.max(1, Number(process.env.BLOCK_WATCH_SECONDS || '3'));
+    if (monitor?.readC && monitor?.startEpoch) {
+      epochPoller = setInterval(async () => {
+        try {
+          const state = await monitor.readC.miningState();
+          const epochChanged = state.epoch.toString() !== monitor.startEpoch;
+          const tooCloseToBoundary = Number(state.epochBlocksLeft) <= miningWindow.safetyBlocks;
+          if (epochChanged || tooCloseToBoundary) {
+            stopMining(new MiningWindowClosed(
+              `mining window closed at epoch ${state.epoch} (${state.epochBlocksLeft} blocks left)`
+            ));
+          }
+        } catch {
+          // Keep the local miner running; the wall-clock timeout is still a fallback.
+        }
+      }, pollSeconds * 1000);
+    }
+
     proc.stdout.on('data', (chunk) => { out += chunk.toString(); });
-    proc.on('error', reject);
+    proc.on('error', (e) => settle(reject, e));
     proc.on('exit', (code) => {
-      if (code !== 0) return reject(new Error(`gpu-miner exited ${code}`));
+      if (done) return;
       const nonce = out.trim().split('\n').pop();
-      if ((!nonce || !/^\d+$/.test(nonce)) && timeoutSeconds) return reject(new MiningTimedOut(timeoutSeconds));
-      if (!nonce || !/^\d+$/.test(nonce)) return reject(new Error(`bad nonce output: ${JSON.stringify(out)}`));
-      resolve(nonce);
+      if (code !== 0) return settle(reject, new Error(`gpu-miner exited ${code}`));
+      if ((!nonce || !/^\d+$/.test(nonce)) && timeoutSeconds) return settle(reject, new MiningTimedOut(timeoutSeconds));
+      if (!nonce || !/^\d+$/.test(nonce)) return settle(reject, new Error(`bad nonce output: ${JSON.stringify(out)}`));
+      settle(resolve, nonce);
     });
   });
 }
