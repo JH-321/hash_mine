@@ -65,6 +65,22 @@ __device__ __forceinline__ U64x rotl64(U64x x, uint32_t n) {
     }
 }
 
+template <uint32_t N>
+__device__ __forceinline__ U64x rotl64c(U64x x) {
+    if constexpr (N == 0) {
+        return x;
+    } else if constexpr (N < 32) {
+        return make_u64x(__funnelshift_l(x.hi, x.lo, N),
+                         __funnelshift_l(x.lo, x.hi, N));
+    } else if constexpr (N == 32) {
+        return make_u64x(x.hi, x.lo);
+    } else {
+        constexpr uint32_t R = N - 32;
+        return make_u64x(__funnelshift_l(x.lo, x.hi, R),
+                         __funnelshift_l(x.hi, x.lo, R));
+    }
+}
+
 __constant__ uint32_t K_RC_LO[24] = {
     0x00000001u, 0x00008082u, 0x0000808au, 0x80008000u,
     0x0000808bu, 0x80000001u, 0x80008081u, 0x00008009u,
@@ -100,11 +116,11 @@ __device__ __forceinline__ void keccakf(U64x* s) {
         U64x c3 = xor64(xor64(xor64(xor64(s[3], s[8]), s[13]), s[18]), s[23]);
         U64x c4 = xor64(xor64(xor64(xor64(s[4], s[9]), s[14]), s[19]), s[24]);
 
-        U64x d0 = xor64(c4, rotl64(c1, 1));
-        U64x d1 = xor64(c0, rotl64(c2, 1));
-        U64x d2 = xor64(c1, rotl64(c3, 1));
-        U64x d3 = xor64(c2, rotl64(c4, 1));
-        U64x d4 = xor64(c3, rotl64(c0, 1));
+        U64x d0 = xor64(c4, rotl64c<1>(c1));
+        U64x d1 = xor64(c0, rotl64c<1>(c2));
+        U64x d2 = xor64(c1, rotl64c<1>(c3));
+        U64x d3 = xor64(c2, rotl64c<1>(c4));
+        U64x d4 = xor64(c3, rotl64c<1>(c0));
 
 #pragma unroll
         for (int y = 0; y < 25; y += 5) {
@@ -171,31 +187,31 @@ __device__ __forceinline__ void keccakf_regs(
         a30 = xor64(a30, d3); a31 = xor64(a31, d3); a32 = xor64(a32, d3); a33 = xor64(a33, d3); a34 = xor64(a34, d3);
         a40 = xor64(a40, d4); a41 = xor64(a41, d4); a42 = xor64(a42, d4); a43 = xor64(a43, d4); a44 = xor64(a44, d4);
 
-        U64x b00 = rotl64(a00, 0);
-        U64x b13 = rotl64(a01, 36);
-        U64x b21 = rotl64(a02, 3);
-        U64x b34 = rotl64(a03, 41);
-        U64x b42 = rotl64(a04, 18);
-        U64x b02 = rotl64(a10, 1);
-        U64x b10 = rotl64(a11, 44);
-        U64x b23 = rotl64(a12, 10);
-        U64x b31 = rotl64(a13, 45);
-        U64x b44 = rotl64(a14, 2);
-        U64x b04 = rotl64(a20, 62);
-        U64x b12 = rotl64(a21, 6);
-        U64x b20 = rotl64(a22, 43);
-        U64x b33 = rotl64(a23, 15);
-        U64x b41 = rotl64(a24, 61);
-        U64x b01 = rotl64(a30, 28);
-        U64x b14 = rotl64(a31, 55);
-        U64x b22 = rotl64(a32, 25);
-        U64x b30 = rotl64(a33, 21);
-        U64x b43 = rotl64(a34, 56);
-        U64x b03 = rotl64(a40, 27);
-        U64x b11 = rotl64(a41, 20);
-        U64x b24 = rotl64(a42, 39);
-        U64x b32 = rotl64(a43, 8);
-        U64x b40 = rotl64(a44, 14);
+        U64x b00 = rotl64c<0>(a00);
+        U64x b13 = rotl64c<36>(a01);
+        U64x b21 = rotl64c<3>(a02);
+        U64x b34 = rotl64c<41>(a03);
+        U64x b42 = rotl64c<18>(a04);
+        U64x b02 = rotl64c<1>(a10);
+        U64x b10 = rotl64c<44>(a11);
+        U64x b23 = rotl64c<10>(a12);
+        U64x b31 = rotl64c<45>(a13);
+        U64x b44 = rotl64c<2>(a14);
+        U64x b04 = rotl64c<62>(a20);
+        U64x b12 = rotl64c<6>(a21);
+        U64x b20 = rotl64c<43>(a22);
+        U64x b33 = rotl64c<15>(a23);
+        U64x b41 = rotl64c<61>(a24);
+        U64x b01 = rotl64c<28>(a30);
+        U64x b14 = rotl64c<55>(a31);
+        U64x b22 = rotl64c<25>(a32);
+        U64x b30 = rotl64c<21>(a33);
+        U64x b43 = rotl64c<56>(a34);
+        U64x b03 = rotl64c<27>(a40);
+        U64x b11 = rotl64c<20>(a41);
+        U64x b24 = rotl64c<39>(a42);
+        U64x b32 = rotl64c<8>(a43);
+        U64x b40 = rotl64c<14>(a44);
 
         a00 = xor64(b00, and64(not64(b10), b20));
         a10 = xor64(b10, and64(not64(b20), b30));
@@ -257,7 +273,7 @@ __global__ void mine_kernel(
 
 #pragma unroll 1
     for (uint32_t iter = 0; iter < nonces_per_thread; iter++) {
-        if (*found != 0u) return;
+        if (nonces_per_thread != 1 && *found != 0u) return;
 
         uint32_t nlo_lo = base_lo + iter;
         uint32_t c0 = nlo_lo < base_lo ? 1u : 0u;
@@ -301,19 +317,82 @@ __global__ void mine_kernel(
             a04, a14, a24, a34, a44
         );
 
-        uint32_t h0 = bswap32(a00.lo), h1 = bswap32(a00.hi);
-        uint32_t h2 = bswap32(a10.lo), h3 = bswap32(a10.hi);
-        uint32_t h4 = bswap32(a20.lo), h5 = bswap32(a20.hi);
-        uint32_t h6 = bswap32(a30.lo), h7 = bswap32(a30.hi);
-        bool less =
-            (h0 < target[0]) || (h0 == target[0] && (
-            (h1 < target[1]) || (h1 == target[1] && (
-            (h2 < target[2]) || (h2 == target[2] && (
-            (h3 < target[3]) || (h3 == target[3] && (
-            (h4 < target[4]) || (h4 == target[4] && (
-            (h5 < target[5]) || (h5 == target[5] && (
-            (h6 < target[6]) || (h6 == target[6] && h7 < target[7])
-            ))))))))))));
+        bool less = false;
+        uint32_t t0 = target[0];
+        if (t0 == 0u) {
+            if (a00.lo == 0u) {
+                uint32_t h1 = bswap32(a00.hi);
+                if (h1 < target[1]) {
+                    less = true;
+                } else if (h1 == target[1]) {
+                    uint32_t h2 = bswap32(a10.lo);
+                    if (h2 < target[2]) {
+                        less = true;
+                    } else if (h2 == target[2]) {
+                        uint32_t h3 = bswap32(a10.hi);
+                        if (h3 < target[3]) {
+                            less = true;
+                        } else if (h3 == target[3]) {
+                            uint32_t h4 = bswap32(a20.lo);
+                            if (h4 < target[4]) {
+                                less = true;
+                            } else if (h4 == target[4]) {
+                                uint32_t h5 = bswap32(a20.hi);
+                                if (h5 < target[5]) {
+                                    less = true;
+                                } else if (h5 == target[5]) {
+                                    uint32_t h6 = bswap32(a30.lo);
+                                    if (h6 < target[6]) {
+                                        less = true;
+                                    } else if (h6 == target[6]) {
+                                        uint32_t h7 = bswap32(a30.hi);
+                                        less = h7 < target[7];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            uint32_t h0 = bswap32(a00.lo);
+            if (h0 < t0) {
+                less = true;
+            } else if (h0 == t0) {
+                uint32_t h1 = bswap32(a00.hi);
+                if (h1 < target[1]) {
+                    less = true;
+                } else if (h1 == target[1]) {
+                    uint32_t h2 = bswap32(a10.lo);
+                    if (h2 < target[2]) {
+                        less = true;
+                    } else if (h2 == target[2]) {
+                        uint32_t h3 = bswap32(a10.hi);
+                        if (h3 < target[3]) {
+                            less = true;
+                        } else if (h3 == target[3]) {
+                            uint32_t h4 = bswap32(a20.lo);
+                            if (h4 < target[4]) {
+                                less = true;
+                            } else if (h4 == target[4]) {
+                                uint32_t h5 = bswap32(a20.hi);
+                                if (h5 < target[5]) {
+                                    less = true;
+                                } else if (h5 == target[5]) {
+                                    uint32_t h6 = bswap32(a30.lo);
+                                    if (h6 < target[6]) {
+                                        less = true;
+                                    } else if (h6 == target[6]) {
+                                        uint32_t h7 = bswap32(a30.hi);
+                                        less = h7 < target[7];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if (less) {
             if (atomicCAS(found, 0u, 1u) == 0u) {
