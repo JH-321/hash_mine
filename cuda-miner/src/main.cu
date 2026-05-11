@@ -27,6 +27,11 @@ struct U64x {
     uint32_t hi;
 };
 
+struct KernelParams {
+    uint32_t challenge[8];
+    uint32_t target[8];
+};
+
 __device__ __forceinline__ U64x make_u64x(uint32_t lo, uint32_t hi) {
     return U64x{lo, hi};
 }
@@ -247,8 +252,7 @@ __device__ __forceinline__ void keccakf_regs(
 
 template <uint32_t FIXED_NONCES_PER_THREAD, uint32_t FIXED_NONCE_STRIDE>
 __global__ void mine_kernel(
-    const uint32_t* __restrict__ challenge,
-    const uint32_t* __restrict__ target,
+    KernelParams params,
     const uint32_t* __restrict__ nonce_base,
     uint32_t* __restrict__ found,
     uint32_t* __restrict__ result,
@@ -297,10 +301,10 @@ __global__ void mine_kernel(
         uint32_t c2 = nhi_lo < base_nhi_lo ? 1u : 0u;
         uint32_t nhi_hi = base_nhi_hi + c2;
 
-        U64x a00 = make_u64x(challenge[0], challenge[1]);
-        U64x a10 = make_u64x(challenge[2], challenge[3]);
-        U64x a20 = make_u64x(challenge[4], challenge[5]);
-        U64x a30 = make_u64x(challenge[6], challenge[7]);
+        U64x a00 = make_u64x(params.challenge[0], params.challenge[1]);
+        U64x a10 = make_u64x(params.challenge[2], params.challenge[3]);
+        U64x a20 = make_u64x(params.challenge[4], params.challenge[5]);
+        U64x a30 = make_u64x(params.challenge[6], params.challenge[7]);
         U64x a40 = make_u64x(0, 0);
         U64x a01 = make_u64x(0, 0);
         U64x a11 = make_u64x(bswap32(nhi_hi), bswap32(nhi_lo));
@@ -332,35 +336,35 @@ __global__ void mine_kernel(
         );
 
         bool less = false;
-        uint32_t t0 = target[0];
+        uint32_t t0 = params.target[0];
         if (t0 == 0u) {
             if (a00.lo == 0u) {
                 uint32_t h1 = bswap32(a00.hi);
-                if (h1 < target[1]) {
+                if (h1 < params.target[1]) {
                     less = true;
-                } else if (h1 == target[1]) {
+                } else if (h1 == params.target[1]) {
                     uint32_t h2 = bswap32(a10.lo);
-                    if (h2 < target[2]) {
+                    if (h2 < params.target[2]) {
                         less = true;
-                    } else if (h2 == target[2]) {
+                    } else if (h2 == params.target[2]) {
                         uint32_t h3 = bswap32(a10.hi);
-                        if (h3 < target[3]) {
+                        if (h3 < params.target[3]) {
                             less = true;
-                        } else if (h3 == target[3]) {
+                        } else if (h3 == params.target[3]) {
                             uint32_t h4 = bswap32(a20.lo);
-                            if (h4 < target[4]) {
+                            if (h4 < params.target[4]) {
                                 less = true;
-                            } else if (h4 == target[4]) {
+                            } else if (h4 == params.target[4]) {
                                 uint32_t h5 = bswap32(a20.hi);
-                                if (h5 < target[5]) {
+                                if (h5 < params.target[5]) {
                                     less = true;
-                                } else if (h5 == target[5]) {
+                                } else if (h5 == params.target[5]) {
                                     uint32_t h6 = bswap32(a30.lo);
-                                    if (h6 < target[6]) {
+                                    if (h6 < params.target[6]) {
                                         less = true;
-                                    } else if (h6 == target[6]) {
+                                    } else if (h6 == params.target[6]) {
                                         uint32_t h7 = bswap32(a30.hi);
-                                        less = h7 < target[7];
+                                        less = h7 < params.target[7];
                                     }
                                 }
                             }
@@ -374,31 +378,31 @@ __global__ void mine_kernel(
                 less = true;
             } else if (h0 == t0) {
                 uint32_t h1 = bswap32(a00.hi);
-                if (h1 < target[1]) {
+                if (h1 < params.target[1]) {
                     less = true;
-                } else if (h1 == target[1]) {
+                } else if (h1 == params.target[1]) {
                     uint32_t h2 = bswap32(a10.lo);
-                    if (h2 < target[2]) {
+                    if (h2 < params.target[2]) {
                         less = true;
-                    } else if (h2 == target[2]) {
+                    } else if (h2 == params.target[2]) {
                         uint32_t h3 = bswap32(a10.hi);
-                        if (h3 < target[3]) {
+                        if (h3 < params.target[3]) {
                             less = true;
-                        } else if (h3 == target[3]) {
+                        } else if (h3 == params.target[3]) {
                             uint32_t h4 = bswap32(a20.lo);
-                            if (h4 < target[4]) {
+                            if (h4 < params.target[4]) {
                                 less = true;
-                            } else if (h4 == target[4]) {
+                            } else if (h4 == params.target[4]) {
                                 uint32_t h5 = bswap32(a20.hi);
-                                if (h5 < target[5]) {
+                                if (h5 < params.target[5]) {
                                     less = true;
-                                } else if (h5 == target[5]) {
+                                } else if (h5 == params.target[5]) {
                                     uint32_t h6 = bswap32(a30.lo);
-                                    if (h6 < target[6]) {
+                                    if (h6 < params.target[6]) {
                                         less = true;
-                                    } else if (h6 == target[6]) {
+                                    } else if (h6 == params.target[6]) {
                                         uint32_t h7 = bswap32(a30.hi);
-                                        less = h7 < target[7];
+                                        less = h7 < params.target[7];
                                     }
                                 }
                             }
@@ -641,14 +645,14 @@ int main(int argc, char** argv) {
         target_words = be_words32(difficulty_bytes);
     }
 
-    uint32_t *d_challenge = nullptr, *d_target = nullptr, *d_nonce_base = nullptr, *d_found = nullptr, *d_result = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_challenge, 8 * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMalloc(&d_target, 8 * sizeof(uint32_t)));
+    KernelParams kernel_params{};
+    std::memcpy(kernel_params.challenge, challenge_words.data(), 8 * sizeof(uint32_t));
+    std::memcpy(kernel_params.target, target_words.data(), 8 * sizeof(uint32_t));
+
+    uint32_t *d_nonce_base = nullptr, *d_found = nullptr, *d_result = nullptr;
     CUDA_CHECK(cudaMalloc(&d_nonce_base, 4 * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc(&d_found, sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc(&d_result, 4 * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemcpy(d_challenge, challenge_words.data(), 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_target, target_words.data(), 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     std::mt19937_64 rng((uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count());
     uint64_t nonce_lo = selftest ? 42ULL : env_u64("CUDA_NONCE_LO", rng());
@@ -671,15 +675,15 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(d_nonce_base, nonce_base, 4 * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
         if (selftest) {
-            mine_kernel<1, 1><<<1, 1>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1, 1);
+            mine_kernel<1, 1><<<1, 1>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
         } else if (nonces_per_thread == 1 && nonce_stride == 1) {
-            mine_kernel<1, 1><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1, 1);
+            mine_kernel<1, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, 1);
         } else if (nonces_per_thread == 1) {
-            mine_kernel<1, 0><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, 1, nonce_stride);
+            mine_kernel<1, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, 1, nonce_stride);
         } else if (nonce_stride == 1) {
-            mine_kernel<0, 1><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread, 1);
+            mine_kernel<0, 1><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, 1);
         } else {
-            mine_kernel<0, 0><<<grid_blocks, block_threads>>>(d_challenge, d_target, d_nonce_base, d_found, d_result, nonces_per_thread, nonce_stride);
+            mine_kernel<0, 0><<<grid_blocks, block_threads>>>(kernel_params, d_nonce_base, d_found, d_result, nonces_per_thread, nonce_stride);
         }
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
