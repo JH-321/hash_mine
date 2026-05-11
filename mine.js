@@ -133,6 +133,12 @@ async function main() {
     const blockNo    = await readProvider.getBlockNumber();
     const miningWindow = miningWindowFor(stateNow.epochBlocksLeft);
     console.log(`\n[block ${blockNo}] challenge=${challenge.slice(0,10)}… difficulty=2^${256 - difficulty.toString(2).length} headroom`);
+    if (miningWindow.closed) {
+      console.log(`↻ mining window closed before start (${miningWindow.blocksLeft} blocks left, guard ${miningWindow.safetyBlocks}); refreshing challenge`);
+      if (ONCE) return;
+      await new Promise(r => setTimeout(r, 1000));
+      continue;
+    }
     if (miningWindow.timeoutSeconds) {
       console.log(`→ mining window: ${miningWindow.timeoutSeconds}s (${miningWindow.blocksLeft} blocks left, guard ${miningWindow.safetyBlocks})`);
     }
@@ -223,6 +229,7 @@ function miningWindowFor(epochBlocksLeft) {
   return {
     blocksLeft,
     safetyBlocks,
+    closed: blocksLeft <= safetyBlocks,
     timeoutSeconds: timeoutSeconds > 0 ? timeoutSeconds : 0,
   };
 }
@@ -279,6 +286,11 @@ async function findNonce(challenge, difficulty, miningWindow, monitor) {
 }
 
 function findNonceGPU(challenge, difficulty, miningWindow, monitor) {
+  if (miningWindow.closed) {
+    return Promise.reject(new MiningWindowClosed(
+      `mining window closed before start (${miningWindow.blocksLeft} blocks left)`
+    ));
+  }
   const diffHex = '0x' + difficulty.toString(16).padStart(64, '0');
   const timeoutSeconds = miningWindow.timeoutSeconds;
   return new Promise((resolve, reject) => {

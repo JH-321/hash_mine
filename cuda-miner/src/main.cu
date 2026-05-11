@@ -568,20 +568,25 @@ static uint64_t env_u64(const char* name, uint64_t fallback) {
     return std::strtoull(v, nullptr, 0);
 }
 
-static double parse_bench_seconds(int argc, char** argv) {
+struct RunLimit {
+    double seconds;
+    bool timeout;
+};
+
+static RunLimit parse_run_limit(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         const char* bench_prefix = "--bench-seconds=";
         size_t bench_len = std::strlen(bench_prefix);
         if (std::strncmp(argv[i], bench_prefix, bench_len) == 0) {
-            return std::strtod(argv[i] + bench_len, nullptr);
+            return RunLimit{std::strtod(argv[i] + bench_len, nullptr), false};
         }
         const char* timeout_prefix = "--timeout-seconds=";
         size_t timeout_len = std::strlen(timeout_prefix);
         if (std::strncmp(argv[i], timeout_prefix, timeout_len) == 0) {
-            return std::strtod(argv[i] + timeout_len, nullptr);
+            return RunLimit{std::strtod(argv[i] + timeout_len, nullptr), true};
         }
     }
-    return 0.0;
+    return RunLimit{0.0, false};
 }
 
 static bool has_flag(int argc, char** argv, const char* flag) {
@@ -600,7 +605,7 @@ int main(int argc, char** argv) {
     auto challenge_bytes = parse_hex32(argv[1]);
     auto difficulty_bytes = parse_hex32(argv[2]);
     bool selftest = has_flag(argc, argv, "--selftest");
-    double bench_seconds = parse_bench_seconds(argc, argv);
+    RunLimit run_limit = parse_run_limit(argc, argv);
 
     int device_id = (int)env_u64("CUDA_DEVICE", 0);
     CUDA_CHECK(cudaSetDevice(device_id));
@@ -724,9 +729,10 @@ int main(int argc, char** argv) {
                          elapsed, (unsigned long long)(total / 1000000ULL), rate);
             last_report = now;
         }
-        if (bench_seconds > 0.0 && elapsed >= bench_seconds) {
+        if (run_limit.seconds > 0.0 && elapsed >= run_limit.seconds) {
             double rate = (double)total / elapsed / 1e9;
-            std::fprintf(stderr, "BENCH %.2fs: %llu MH searched, %.3f GH/s\n",
+            std::fprintf(stderr, "%s %.2fs: %llu MH searched, %.3f GH/s\n",
+                         run_limit.timeout ? "TIMEOUT" : "BENCH",
                          elapsed, (unsigned long long)(total / 1000000ULL), rate);
             return 0;
         }
