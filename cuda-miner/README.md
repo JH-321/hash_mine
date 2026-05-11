@@ -42,7 +42,7 @@ make CUDA_ARCH_FLAGS="-gencode arch=compute_90,code=sm_90"   # H100 only
 - `CUDA_DEVICE`: GPU index, default `0`
 - `CUDA_BLOCK_THREADS`: threads per block, default `256`
 - `CUDA_BATCH_LOG2`: hashes per dispatch as `2^N`, default `28`
-- `CUDA_NONCES_PER_THREAD`: sequential nonces per CUDA thread, default `1`
+- `CUDA_NONCES_PER_THREAD`: sequential nonces per CUDA thread, one of `1`, `2`, `4`, `8`; default `1`
 
 Starting points:
 
